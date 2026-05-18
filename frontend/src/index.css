@@ -1,0 +1,158 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300..700;1,14..32,300..700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans:    "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Plus Jakarta Sans", sans-serif;
+}
+
+/* ── CSS Custom properties ─────────────────────────────────────────── */
+:root {
+  --color-bg:      #f8fafc;
+  --sidebar-width: 256px;
+  --header-height: 64px;
+}
+
+/* ── Base styles ───────────────────────────────────────────────────── */
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply font-sans bg-slate-50 text-slate-900 antialiased;
+    font-feature-settings: "cv02","cv03","cv04","cv11";
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+    @apply font-bold tracking-tight;
+  }
+
+  /* Smooth scroll */
+  html { scroll-behavior: smooth; }
+
+  /* Better focus visible */
+  :focus-visible { outline: 2px solid var(--color-primary, #1a365d); outline-offset: 2px; }
+
+  /* iOS safe areas */
+  .pb-safe { padding-bottom: env(safe-area-inset-bottom, 1rem); }
+  .h-safe-bottom { height: env(safe-area-inset-bottom, 0); }
+}
+
+/* ── Theme classes ─────────────────────────────────────────────────── */
+.theme-van-default {
+  --color-primary: #1a365d;
+  --color-accent:  #e11d48;
+}
+.theme-van-green {
+  --color-primary: #065f46;
+  --color-accent:  #f59e0b;
+}
+.theme-van-purple {
+  --color-primary: #4c1d95;
+  --color-accent:  #ec4899;
+}
+.theme-van-ocean {
+  --color-primary: #0c4a6e;
+  --color-accent:  #06b6d4;
+}
+
+/* ── Scrollbar ─────────────────────────────────────────────────────── */
+::-webkit-scrollbar       { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { @apply bg-slate-300 rounded-full; }
+::-webkit-scrollbar-thumb:hover { @apply bg-slate-400; }
+.scrollbar-none { scrollbar-width: none; }
+.scrollbar-none::-webkit-scrollbar { display: none; }
+
+/* ── Utilities ─────────────────────────────────────────────────────── */
+.line-clamp-1 { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; }
+.line-clamp-2 { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.line-clamp-3 { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+
+/* Table responsive helper */
+.table-responsive { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 1rem; }
+
+/* Skeleton pulse */
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+.animate-pulse { animation: pulse 2s cubic-bezier(.4,0,.6,1) infinite; }
+
+/* ── Dark mode ─────────────────────────────────────────────────────── */
+.dark {
+  color-scheme: dark;
+  --color-bg: #020617; /* Slate 950 pour un noir élégant */
+}
+
+/* Global Dark Overrides */
+.dark body                                          { @apply bg-slate-950 text-slate-200 antialiased; }
+
+/* Surfaces */
+.dark .bg-white                                     { @apply !bg-slate-900/80 !backdrop-blur-md; }
+.dark .bg-slate-50, .dark .bg-slate-100            { @apply !bg-slate-900/50; }
+.dark .bg-slate-200                                 { @apply !bg-slate-800; }
+.dark .bg-slate-50\/80                              { @apply !bg-slate-900/40; }
+
+/* Borders */
+.dark .border-slate-100, .dark .border-slate-200    { @apply !border-slate-800/80; }
+
+/* Text Colors */
+.dark .text-slate-900                               { @apply !text-slate-50; }
+.dark .text-slate-800                               { @apply !text-slate-100; }
+.dark .text-slate-700                               { @apply !text-slate-200; }
+.dark .text-slate-600                               { @apply !text-slate-300; }
+.dark .text-slate-500                               { @apply !text-slate-400; }
+.dark .text-slate-400                               { @apply !text-slate-500; }
+
+/* Form Elements */
+.dark input, .dark select, .dark textarea           { @apply !bg-slate-900 !border-slate-800 !text-slate-100 placeholder:text-slate-600 focus:ring-2 focus:ring-[var(--color-primary)]/50; }
+.dark .hover\:bg-slate-50:hover                     { @apply !bg-slate-800/80; }
+.dark .hover\:bg-slate-100:hover                    { @apply !bg-slate-800/80; }
+.dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]) { @apply border-slate-800/60; }
+
+/* Semantic colors in dark */
+.dark .bg-blue-50                                   { @apply !bg-blue-900/30 !text-blue-300 !border-blue-800/50; }
+.dark .bg-emerald-50                                { @apply !bg-emerald-900/30 !text-emerald-300 !border-emerald-800/50; }
+.dark .bg-amber-50                                  { @apply !bg-amber-900/30 !text-amber-300 !border-amber-800/50; }
+.dark .bg-red-50                                    { @apply !bg-red-900/30 !text-red-300 !border-red-800/50; }
+.dark .bg-purple-50                                 { @apply !bg-purple-900/30 !text-purple-300 !border-purple-800/50; }
+
+.dark .bg-blue-100, .dark .bg-blue-200              { @apply !bg-blue-500/20 !text-blue-200; }
+.dark .bg-emerald-100, .dark .bg-emerald-200        { @apply !bg-emerald-500/20 !text-emerald-200; }
+.dark .bg-amber-100, .dark .bg-amber-200            { @apply !bg-amber-500/20 !text-amber-200; }
+.dark .bg-red-100, .dark .bg-red-200                { @apply !bg-red-500/20 !text-red-200; }
+
+/* Shadows */
+.dark .shadow-sm, .dark .shadow-md, .dark .shadow-lg, .dark .shadow-xl {
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -2px rgba(0, 0, 0, 0.2);
+}
+
+/* ── Density ───────────────────────────────────────────────────────── */
+.density-compact  { --space: 0.75rem; }
+.density-comfortable { --space: 1.25rem; }
+.density-large    { --space: 2rem; }
+
+/* ── Animations ────────────────────────────────────────────────────── */
+@keyframes fade-in     { from{opacity:0}to{opacity:1} }
+@keyframes slide-up    { from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)} }
+@keyframes zoom-in     { from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)} }
+@keyframes slide-right { from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:translateX(0)} }
+
+.animate-in               { animation: fade-in .2s ease both; }
+.fade-in                  { animation: fade-in .15s ease both; }
+.slide-in-from-bottom-4   { animation: slide-up .2s ease both; }
+.zoom-in-95               { animation: zoom-in .15s ease both; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, .animate-in, .fade-in, .slide-in-from-bottom-4, .zoom-in-95, .animate-pulse { animation: none !important; transition: none !important; }
+}
+
+/* ── Print ─────────────────────────────────────────────────────────── */
+@media print {
+  aside, header, .no-print { display: none !important; }
+  body { background: white; }
+  .print-full-width { width: 100% !important; }
+}

@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://van-btp-erp.cm/sitemap.xml
