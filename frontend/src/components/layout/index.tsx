@@ -14,21 +14,16 @@ import { useUser, Role } from '../../context/UserContext';
 import { useData } from '../../context/DataContext';
 import { useNotification } from '../../context/NotificationContext';
 import { authService } from '../../services/auth.service';
+import { approvalService } from '../../services/approval.service';
+import { scrollToHashElement } from '../../lib/scrollToHash';
 
-const getRoleLabel = (role: Role | null) => {
-  const labels: Record<string, string> = {
-    // Anciens rôles (Claude9)
-    dg: 'Directeur Général',
-    chef: 'Chef de Chantier',
-    technicien: 'Technicien',
-    rh: 'Ressources Humaines',
-    // Nouveaux rôles (Claude10)
-    Directeur_technique: 'Directeur Général',
-    Chef_chantier: 'Chef de Chantier',
-    Technicien_chantier: 'Technicien',
-    RH: 'Ressources Humaines'
-  };
-  return labels[role || ''] || 'Utilisateur';
+const ROLE_I18N_KEYS: Record<string, string> = {
+  dg: 'roles.dg',
+  chef: 'roles.chef',
+  'Directeur technique': 'roles.directeur_technique',
+  Chef_chantier: 'roles.chef_chantier',
+  'Gestionnaire de stocks': 'roles.gerant_stock',
+  Gerant_production: 'roles.gerant_production',
 };
 
 const getRoleBadgeColor = (role: Role | null) => {
@@ -36,21 +31,35 @@ const getRoleBadgeColor = (role: Role | null) => {
     // Anciens rôles
     dg: 'bg-purple-100 text-purple-700',
     chef: 'bg-blue-100 text-blue-700',
-    technicien: 'bg-amber-100 text-amber-700',
-    rh: 'bg-emerald-100 text-emerald-700',
-    // Nouveaux rôles
-    Directeur_technique: 'bg-purple-100 text-purple-700',
+    'Directeur technique': 'bg-purple-100 text-purple-700',
     Chef_chantier: 'bg-blue-100 text-blue-700',
-    Technicien_chantier: 'bg-amber-100 text-amber-700',
-    RH: 'bg-emerald-100 text-emerald-700'
+    'Gestionnaire de stocks': 'bg-indigo-100 text-indigo-700',
+    Gerant_production: 'bg-orange-100 text-orange-700',
   };
   return colors[role || ''] || 'bg-slate-100 text-slate-600';
 };
 
 export const MainLayout = () => {
   const { t, i18n } = useTranslation();
+  const getRoleLabel = (r: Role | null) => t(ROLE_I18N_KEYS[r || ''] || 'roles.user');
   const { role, profile, updateProfile, logout } = useUser();
   const { projects } = useData();
+  const [pendingApprovalsCount, setPendingApprovalsCount] = useState(0);
+
+  useEffect(() => {
+    if (role !== 'Directeur technique') {
+      setPendingApprovalsCount(0);
+      return;
+    }
+    const load = () => {
+      approvalService.getPending()
+        .then((r) => setPendingApprovalsCount(r.counts.total))
+        .catch(() => setPendingApprovalsCount(0));
+    };
+    load();
+    window.addEventListener('van_btp:approvals_updated', load);
+    return () => window.removeEventListener('van_btp:approvals_updated', load);
+  }, [role]);
   const { persistentNotifications, setPersistentNotifications } = useNotification();
   const navigate = useNavigate();
   const location = useLocation();
@@ -92,14 +101,14 @@ export const MainLayout = () => {
   const handleLogout = () => { logout(); navigate('/login'); };
 
   const allNavItems = [
-    { icon: LayoutDashboard, label: t('nav.dashboard'), path: '/dashboard', roles: ['Directeur_technique', 'Chef_chantier', 'Technicien_chantier', 'RH'] },
-    { icon: HardHat, label: t('nav.projects'), path: '/projects', roles: ['Directeur_technique', 'Chef_chantier', 'Technicien_chantier'] },
-    { icon: Wallet, label: 'Finances', path: '/finances', roles: ['Directeur_technique', 'Chef_chantier'] },
-    { icon: Truck, label: role === 'RH' ? 'Personnel & RH' : t('nav.resources'), path: '/resources', roles: ['Directeur_technique', 'Chef_chantier', 'Technicien_chantier', 'RH'] },
-    { icon: ShieldCheck, label: 'Contrôle', path: '/control', roles: ['Directeur_technique', 'Chef_chantier', 'Technicien_chantier'] },
-    { icon: Factory, label: 'Production', path: '/production', roles: ['Directeur_technique', 'Chef_chantier'] },
-    { icon: Globe, label: t('nav.support'), path: '/support', roles: ['Directeur_technique', 'Chef_chantier', 'Technicien_chantier', 'RH'], dividerBefore: true },
-    { icon: Settings, label: t('nav.settings'), path: '/settings', roles: ['Directeur_technique', 'Chef_chantier', 'Technicien_chantier', 'RH'] },
+    { icon: LayoutDashboard, label: t('nav.dashboard'), path: '/dashboard', roles: ['Directeur technique'] },
+    { icon: HardHat, label: t('nav.projects'), path: '/projects', roles: ['Directeur technique', 'Chef_chantier'] },
+    { icon: Wallet, label: t('nav.finances'), path: '/finances', roles: ['Directeur technique', 'Chef_chantier'] },
+    { icon: Truck, label: t('nav.resources'), path: '/resources', roles: ['Directeur technique', 'Chef_chantier', 'Gestionnaire de stocks'] },
+    { icon: ShieldCheck, label: t('nav.control'), path: '/control', roles: ['Directeur technique', 'Chef_chantier'] },
+    { icon: Factory, label: t('nav.production'), path: '/production', roles: ['Directeur technique', 'Gerant_production'] },
+    { icon: Globe, label: t('nav.support'), path: '/support', roles: ['Directeur technique', 'Chef_chantier'], dividerBefore: true },
+    { icon: Settings, label: t('nav.settings'), path: '/settings', roles: ['Directeur technique', 'Chef_chantier'] },
   ];
   const navItems = allNavItems.filter(item => item.roles.includes(role || ''));
 
@@ -125,105 +134,117 @@ export const MainLayout = () => {
       </AnimatePresence>
 
       {/* ── Sidebar ─────────────────────────────────────────────────────── */}
-      <aside className={cn(
-        'fixed inset-y-0 left-0 z-50 flex flex-col bg-[var(--color-primary)] text-white transition-all duration-300',
-        'lg:static lg:translate-x-0',
-        sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0',
-        expanded ? 'w-64' : 'w-[72px]',
-      )}>
-        {/* Logo */}
-        <div className={cn(
-          'flex h-16 items-center border-b border-white/10 shrink-0 transition-all',
-          expanded ? 'px-5 gap-3' : 'justify-center px-0'
+      {!['Gestionnaire de stocks', 'Gerant_production'].includes(role || '') && (
+        <aside className={cn(
+          'fixed inset-y-0 left-0 z-50 flex flex-col bg-[var(--color-primary)] text-white transition-all duration-300',
+          'lg:static lg:translate-x-0',
+          sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0',
+          expanded ? 'w-64' : 'w-[72px]',
         )}>
-          <div className="flex items-center justify-center h-10 w-10 overflow-hidden shrink-0">
-            <img src="/logo.png?v=2" alt="VAN BTP" className="w-full h-full object-contain" />
-          </div>
-          {expanded && (
-            <div className="overflow-hidden">
-              <p className="font-black text-lg tracking-tight leading-none text-white">VAN BTP</p>
-              <p className="text-[9px] text-white/50 font-semibold uppercase tracking-[0.15em] mt-0.5">ERP Construction</p>
+          {/* Logo */}
+          <div className={cn(
+            'flex h-16 items-center border-b border-white/10 shrink-0 transition-all',
+            expanded ? 'px-5 gap-3' : 'justify-center px-0'
+          )}>
+            <div className="flex items-center justify-center h-10 w-10 overflow-hidden shrink-0">
+              <img src="/logo.png?v=2" alt="VAN BTP" className="w-full h-full object-contain" />
             </div>
-          )}
-          {/* Desktop collapse toggle */}
-          <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-            className={cn('hidden lg:flex ml-auto p-1.5 rounded-lg hover:bg-white/10 text-white/60 hover:text-white transition-colors shrink-0', !expanded && 'ml-0')}>
-            <ChevronRight className={cn('w-4 h-4 transition-transform duration-300', expanded && 'rotate-180')} />
-          </button>
-          {/* Mobile close */}
-          <button onClick={() => setSidebarOpen(false)} className="lg:hidden ml-auto p-1.5 rounded-lg hover:bg-white/10 text-white/60">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
+            {expanded && (
+              <div className="overflow-hidden">
+                <p className="font-black text-lg tracking-tight leading-none text-white">VAN BTP</p>
+                <p className="text-[9px] text-white/50 font-semibold uppercase tracking-[0.15em] mt-0.5">{t('nav.erp_subtitle')}</p>
+              </div>
+            )}
+            {/* Desktop collapse toggle */}
+            <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+              className={cn('hidden lg:flex ml-auto p-1.5 rounded-lg hover:bg-white/10 text-white/60 hover:text-white transition-colors shrink-0', !expanded && 'ml-0')}>
+              <ChevronRight className={cn('w-4 h-4 transition-transform duration-300', expanded && 'rotate-180')} />
+            </button>
+            {/* Mobile close */}
+            <button onClick={() => setSidebarOpen(false)} className="lg:hidden ml-auto p-1.5 rounded-lg hover:bg-white/10 text-white/60">
+              <X className="w-5 h-5" />
+            </button>
+          </div>
 
-        {/* Nav */}
-        <nav className="flex-1 overflow-y-auto py-4 px-2 space-y-0.5 overscroll-contain">
-          {navItems.map((item, idx) => (
-            <React.Fragment key={item.path}>
-              {item.dividerBefore && idx > 0 && (
-                <div className="my-2 border-t border-white/10 mx-2" />
-              )}
-              <NavLink to={item.path}
-                className={({ isActive }) => cn(
-                  'flex items-center rounded-xl transition-all duration-150 group relative',
-                  expanded ? 'gap-3 px-3 py-2.5' : 'justify-center p-3',
-                  isActive
-                    ? 'bg-white text-[var(--color-primary)] shadow-sm'
-                    : 'text-white/70 hover:bg-white/10 hover:text-white'
-                )}>
-                {({ isActive }) => (
-                  <>
-                    <item.icon className="w-5 h-5 shrink-0" />
-                    {expanded && <span className="text-sm font-medium truncate">{item.label}</span>}
-                    {expanded && isActive && <ChevronRight className="w-3.5 h-3.5 ml-auto opacity-50" />}
-                    {/* Tooltip when collapsed */}
-                    {!expanded && (
-                      <div className="absolute left-full ml-3 px-2.5 py-1.5 bg-slate-900 text-white text-xs font-medium rounded-lg shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50">
-                        {item.label}
-                      </div>
-                    )}
-                  </>
+          {/* Nav */}
+          <nav className="flex-1 overflow-y-auto py-4 px-2 space-y-0.5 overscroll-contain">
+            {navItems.map((item, idx) => (
+              <React.Fragment key={item.path}>
+                {item.dividerBefore && idx > 0 && (
+                  <div className="my-2 border-t border-white/10 mx-2" />
                 )}
-              </NavLink>
-            </React.Fragment>
-          ))}
-        </nav>
+                <NavLink to={item.path}
+                  className={({ isActive }) => cn(
+                    'flex items-center rounded-xl transition-all duration-150 group relative',
+                    expanded ? 'gap-3 px-3 py-2.5' : 'justify-center p-3',
+                    isActive
+                      ? 'bg-white text-[var(--color-primary)] shadow-sm'
+                      : 'text-white/70 hover:bg-white/10 hover:text-white'
+                  )}>
+                  {({ isActive }) => (
+                    <>
+                      <item.icon className="w-5 h-5 shrink-0" />
+                      {expanded && <span className="text-sm font-medium truncate">{item.label}</span>}
+                      {item.path === '/dashboard' && pendingApprovalsCount > 0 && (
+                        <span className={cn(
+                          'bg-red-500 text-white text-[10px] font-black min-w-[1.25rem] h-5 px-1.5 rounded-full flex items-center justify-center',
+                          expanded ? 'ml-auto' : 'absolute -top-1 -right-1'
+                        )}>
+                          {pendingApprovalsCount > 9 ? '9+' : pendingApprovalsCount}
+                        </span>
+                      )}
+                      {expanded && isActive && !(item.path === '/dashboard' && pendingApprovalsCount > 0) && (
+                        <ChevronRight className="w-3.5 h-3.5 ml-auto opacity-50" />
+                      )}
+                      {/* Tooltip when collapsed */}
+                      {!expanded && (
+                        <div className="absolute left-full ml-3 px-2.5 py-1.5 bg-slate-900 text-white text-xs font-medium rounded-lg shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50">
+                          {item.label}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </NavLink>
+              </React.Fragment>
+            ))}
+          </nav>
 
-        {/* User footer */}
-        <div className={cn('border-t border-white/10 p-2 shrink-0')}>
-          {expanded ? (
-            <button onClick={() => setProfileOpen(true)}
-              className="flex items-center gap-3 w-full p-2.5 rounded-xl hover:bg-white/10 transition-colors text-left">
-              <div className="w-8 h-8 rounded-full bg-white/20 text-white text-sm font-bold flex items-center justify-center shrink-0 overflow-hidden">
-                {profile?.photoUrl
-                  ? <img src={profile.photoUrl} alt="" className="w-full h-full object-cover" />
-                  : (profile?.name || 'U').split(' ').map(n => n[0]).join('').slice(0, 2)
-                }
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-white truncate">{profile?.name || getRoleLabel(role)}</p>
-                <p className="text-xs text-white/50 truncate">{getRoleLabel(role)}</p>
-              </div>
+          {/* User footer */}
+          <div className={cn('border-t border-white/10 p-2 shrink-0')}>
+            {expanded ? (
+              <button onClick={() => setProfileOpen(true)}
+                className="flex items-center gap-3 w-full p-2.5 rounded-xl hover:bg-white/10 transition-colors text-left">
+                <div className="w-8 h-8 rounded-full bg-white/20 text-white text-sm font-bold flex items-center justify-center shrink-0 overflow-hidden">
+                  {profile?.photoUrl
+                    ? <img src={profile.photoUrl} alt="" className="w-full h-full object-cover" />
+                    : (profile?.name || 'U').split(' ').map(n => n[0]).join('').slice(0, 2)
+                  }
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-white truncate">{profile?.name || getRoleLabel(role)}</p>
+                  <p className="text-xs text-white/50 truncate">{getRoleLabel(role)}</p>
+                </div>
+              </button>
+            ) : (
+              <button onClick={() => setProfileOpen(true)}
+                className="flex justify-center w-full p-3 rounded-xl hover:bg-white/10 transition-colors">
+                <div className="w-8 h-8 rounded-full bg-white/20 text-white text-sm font-bold flex items-center justify-center overflow-hidden">
+                  {profile?.photoUrl
+                    ? <img src={profile.photoUrl} alt="" className="w-full h-full object-cover" />
+                    : (profile?.name || 'U').split(' ').map(n => n[0]).join('').slice(0, 2)
+                  }
+                </div>
+              </button>
+            )}
+            <button onClick={handleLogout}
+              className={cn('flex items-center gap-3 w-full p-2.5 rounded-xl text-red-300 hover:bg-red-500/20 hover:text-red-200 transition-colors mt-1',
+                !expanded && 'justify-center')}>
+              <LogOut className="w-4 h-4 shrink-0" />
+              {expanded && <span className="text-sm font-medium">{t('nav.logout')}</span>}
             </button>
-          ) : (
-            <button onClick={() => setProfileOpen(true)}
-              className="flex justify-center w-full p-3 rounded-xl hover:bg-white/10 transition-colors">
-              <div className="w-8 h-8 rounded-full bg-white/20 text-white text-sm font-bold flex items-center justify-center overflow-hidden">
-                {profile?.photoUrl
-                  ? <img src={profile.photoUrl} alt="" className="w-full h-full object-cover" />
-                  : (profile?.name || 'U').split(' ').map(n => n[0]).join('').slice(0, 2)
-                }
-              </div>
-            </button>
-          )}
-          <button onClick={handleLogout}
-            className={cn('flex items-center gap-3 w-full p-2.5 rounded-xl text-red-300 hover:bg-red-500/20 hover:text-red-200 transition-colors mt-1',
-              !expanded && 'justify-center')}>
-            <LogOut className="w-4 h-4 shrink-0" />
-            {expanded && <span className="text-sm font-medium">Déconnexion</span>}
-          </button>
-        </div>
-      </aside>
+          </div>
+        </aside>
+      )}
 
       {/* ── Main ────────────────────────────────────────────────────────── */}
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -240,7 +261,7 @@ export const MainLayout = () => {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
             <input type="text" value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
               onFocus={() => setSearchOpen(true)} onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
-              placeholder="Rechercher un chantier..." className="w-full pl-9 pr-4 py-2 text-sm bg-slate-100 border-0 rounded-xl focus:bg-white focus:ring-2 focus:ring-[var(--color-primary)]/20 outline-none transition-all placeholder:text-slate-400" />
+              placeholder={t('nav.search_projects')} className="w-full pl-9 pr-4 py-2 text-sm bg-slate-100 border-0 rounded-xl focus:bg-white focus:ring-2 focus:ring-[var(--color-primary)]/20 outline-none transition-all placeholder:text-slate-400" />
             {/* Dropdown résultats */}
             {searchOpen && searchResults.length > 0 && (
               <div className="absolute top-full mt-1 left-0 right-0 bg-white rounded-xl shadow-xl border border-slate-200 z-50 overflow-hidden">
@@ -296,6 +317,14 @@ export const MainLayout = () => {
                 <p className="text-xs text-slate-400 leading-tight">{getRoleLabel(role)}</p>
               </div>
             </button>
+
+            {['Gestionnaire de stocks', 'Gerant_production'].includes(role || '') && (
+              <button onClick={handleLogout}
+                className="flex items-center gap-2 p-2 hover:bg-red-50 rounded-xl text-red-600 transition-colors">
+                <LogOut className="w-5 h-5" />
+                <span className="hidden sm:inline text-sm font-bold">Déconnexion</span>
+              </button>
+            )}
           </div>
         </header>
 
@@ -308,7 +337,7 @@ export const MainLayout = () => {
       </main>
 
       {/* ── Notifications Drawer ─────────────────────────────────────────── */}
-      <Drawer isOpen={notifOpen} onClose={() => setNotifOpen(false)} title="Notifications">
+      <Drawer isOpen={notifOpen} onClose={() => setNotifOpen(false)} title={t('nav.notifications')}>
         <div className="space-y-2">
           {unread > 0 && (
             <div className="flex items-center justify-between mb-4">
@@ -327,7 +356,16 @@ export const MainLayout = () => {
           )}
           {persistentNotifications.map(notif => (
             <div key={notif.id} onClick={() => {
-              if (notif.path) { navigate(notif.path); setNotifOpen(false); }
+              if (notif.path) {
+                const [pathname, hashPart] = notif.path.split('#');
+                if (hashPart) {
+                  navigate({ pathname: pathname || '/dashboard', hash: hashPart });
+                  scrollToHashElement(`#${hashPart}`);
+                } else {
+                  navigate(notif.path);
+                }
+                setNotifOpen(false);
+              }
               setPersistentNotifications(prev => prev.map(n => n.id === notif.id ? { ...n, read: true } : n));
             }}
               className={cn('flex gap-3 p-3.5 rounded-2xl cursor-pointer transition-colors',
@@ -352,7 +390,7 @@ export const MainLayout = () => {
 
       {/* ── Profile Modal ────────────────────────────────────────────────── */}
       <Modal isOpen={profileOpen} onClose={() => { setProfileOpen(false); setEditingProfile(false); }}
-        title={editingProfile ? 'Modifier le profil' : 'Mon profil'} size="md">
+        title={editingProfile ? t('profile.edit_title') : t('profile.title')} size="md">
         {!editingProfile ? (
           <div className="space-y-5">
             {/* Avatar + nom */}
@@ -374,7 +412,7 @@ export const MainLayout = () => {
             <div className="grid grid-cols-1 gap-3">
               {[
                 { icon: Mail, label: 'Email', value: profile?.email || '—' },
-                { icon: Phone, label: 'Téléphone', value: profileForm.phone || '—' },
+                { icon: Phone, label: t('profile.phone'), value: profileForm.phone || '—' },
               ].map(({ icon: Icon, label, value }) => (
                 <div key={label} className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl">
                   <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center shadow-sm shrink-0">
@@ -415,7 +453,7 @@ export const MainLayout = () => {
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setProfileForm(p => ({ ...p, name: e.target.value }))} />
             <Input label="Email" type="email" value={profileForm.email}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setProfileForm(p => ({ ...p, email: e.target.value }))} />
-            <Input label="Téléphone" value={profileForm.phone}
+            <Input label={t('profile.phone')} value={profileForm.phone}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setProfileForm(p => ({ ...p, phone: e.target.value }))} />
             <div className="flex gap-3 pt-2">
               <Button variant="outline" fullWidth type="button" onClick={() => setEditingProfile(false)}>{t('common.cancel')}</Button>

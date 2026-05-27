@@ -14,6 +14,8 @@ const Employee = sequelize.define('Employee', {
   phone: { type: DataTypes.STRING(20) },
   // FK vers Project courant
   projectId: { type: DataTypes.INTEGER, allowNull: true },
+  isLocal: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false },
+  weeklySalary: { type: DataTypes.DECIMAL(12, 2), allowNull: true },
 }, { tableName: 'employees', timestamps: true, paranoid: true });
 
 module.exports = Employee;

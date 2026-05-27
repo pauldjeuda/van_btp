@@ -6,8 +6,6 @@
  * Comptes créés :
  *  DG       — VMAT0001 / admin123
  *  Chef     — VMAT0002 / chef123
- *  Technicien — VMAT0003 / tech123
- *  RH       — VMAT0004 / rh1234
  */
 require('dotenv').config();
 const bcrypt    = require('bcryptjs');
@@ -16,7 +14,7 @@ const db        = require('../models');
 
 const users = [
   {
-    model: 'Directeur_technique',
+    model: 'Directeur technique',
     data: {
       matricule: 'VMAT0001',
       nom: 'Abena',
@@ -44,31 +42,31 @@ const users = [
       doitChangerMotDePasse: false,
     },
   },
+
   {
-    model: 'TechnicienChantier',
+    model: 'GerantProduction',
     data: {
-      matricule: 'VMAT0003',
-      nom: 'Mvondo',
-      prenom: 'Eric',
-      email: 'eric.mvondo@vanbtp.cm',
-      motDePasse: 'tech123',
-      telephone: '+237 692 00 00 03',
-      specialite: 'Maçonnerie',
-      dateEmbauche: '2022-06-01',
+      matricule: 'VMAT0005',
+      nom: 'Talla',
+      prenom: 'Alain',
+      email: 'alain.talla@vanbtp.cm',
+      motDePasse: 'prod123',
+      telephone: '+237 694 00 00 05',
+      dateEmbauche: '2023-01-15',
       actif: true,
       doitChangerMotDePasse: false,
     },
   },
   {
-    model: 'RH',
+    model: 'GerantStock',
     data: {
-      matricule: 'VMAT0004',
-      nom: 'Bello',
-      prenom: 'Marie',
-      email: 'marie.bello@vanbtp.cm',
-      motDePasse: 'rh1234',
-      telephone: '+237 693 00 00 04',
-      dateEmbauche: '2021-09-01',
+      matricule: 'VMAT0006',
+      nom: 'Eteki',
+      prenom: 'David',
+      email: 'david.eteki@vanbtp.cm',
+      motDePasse: 'stock123',
+      telephone: '+237 695 00 00 06',
+      dateEmbauche: '2023-02-01',
       actif: true,
       doitChangerMotDePasse: false,
     },
@@ -79,7 +77,7 @@ const run = async () => {
   try {
     await sequelize.authenticate();
     console.log('✅ Connexion MySQL OK\n');
-    await sequelize.sync({ alter: true });
+    await sequelize.sync({ alter: false });
     console.log('✅ Tables synchronisées\n');
 
     for (const { model, data } of users) {
@@ -102,8 +100,8 @@ const run = async () => {
     console.log('Comptes disponibles :');
     console.log('  DG          VMAT0001  admin123');
     console.log('  Chef        VMAT0002  chef123');
-    console.log('  Technicien  VMAT0003  tech123');
-    console.log('  RH          VMAT0004  rh1234');
+    console.log('  Prod        VMAT0005  prod123');
+    console.log('  Stock       VMAT0006  stock123');
     console.log('─────────────────────────────────────────\n');
     process.exit(0);
   } catch (err) {

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, Button, Input, Modal, cn } from '../../components/ui';
 import {
@@ -36,6 +36,7 @@ import { useUser } from '../../context/UserContext';
 import { useData } from '../../context/DataContext';
 import { useNotification } from '../../context/NotificationContext';
 import { ControlKpiCard, ChecklistItem, AuditItem } from './ControlComponents';
+import { ReportPhotos } from '../../components/project/ReportPhotos';
 
 export const ControlPage = () => {
   const { t } = useTranslation();
@@ -86,13 +87,32 @@ export const ControlPage = () => {
   const [editChecklistTitle, setEditChecklistTitle] = useState("");
   const [selectedChecklist, setSelectedChecklist] = useState<any>(null);
 
+  const mapGravityToDb = (g: string) => {
+    const map: Record<string, string> = {
+      Faible: 'Mineur',
+      Moyen: 'Modéré',
+      Haut: 'Grave',
+      Critique: 'Critique',
+    };
+    return map[g] || g || 'Mineur';
+  };
+
   const [newIncident, setNewIncident] = useState({
     type: 'Accident de travail',
     gravity: 'Moyen',
-    projectId: projects[0]?.id || 0,
+    projectId: 0,
     desc: '',
     title: ''
   });
+
+  useEffect(() => {
+    if (!projects.length) return;
+    setNewIncident((prev) => {
+      const valid = projects.some((p) => p.id === prev.projectId);
+      if (valid && prev.projectId) return prev;
+      return { ...prev, projectId: projects[0].id };
+    });
+  }, [projects]);
 
   const [newAudit, setNewAudit] = useState({
     type: 'Inspection HSE Terrain',
@@ -118,7 +138,7 @@ export const ControlPage = () => {
 
   const incidentsData: any[] = [];
 
-  const effectiveProjectFilter = role === 'Technicien_chantier' ? (technicianProjectId || null) : selectedProjectFilter;
+  const effectiveProjectFilter = selectedProjectFilter;
 
   const filteredIncidents = incidents.filter(incident => {
     const matchesTab = activeTab === 'all' || incident.category === activeTab;
@@ -130,24 +150,42 @@ export const ControlPage = () => {
     effectiveProjectFilter === null || audit.projectId === effectiveProjectFilter
   );
 
-  const [incidentImage, setIncidentImage] = useState<string | null>(null);
-  const [incidentFile, setIncidentFile] = useState<File | null>(null);
+  const [incidentImages, setIncidentImages] = useState<string[]>([]);
+  const [incidentFiles, setIncidentFiles] = useState<File[]>([]);
 
-  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setIncidentFile(file);
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setIncidentImage(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+  const handleImagesChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    if (incidentFiles.length + files.length > 10) {
+      notify(t('control.photos_max'), 'error');
+      return;
     }
+    const nextFiles = [...incidentFiles, ...files].slice(0, 10);
+    setIncidentFiles(nextFiles);
+    const readers = nextFiles.map(
+      (file) =>
+        new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.readAsDataURL(file);
+        }),
+    );
+    Promise.all(readers).then(setIncidentImages);
+    e.target.value = '';
+  };
+
+  const removeIncidentPhoto = (index: number) => {
+    setIncidentFiles((prev) => prev.filter((_, i) => i !== index));
+    setIncidentImages((prev) => prev.filter((_, i) => i !== index));
   };
 
   const handleIncidentSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (incidentStep < 2) {
+      if (!newIncident.projectId || !projects.some((p) => p.id === newIncident.projectId)) {
+        notify(t('control.invalid_site'), 'error');
+        return;
+      }
       setIncidentStep(incidentStep + 1);
     } else {
       if (isSubmittingIncident) return; // Protection contre les clics multiples
@@ -161,7 +199,7 @@ export const ControlPage = () => {
           type: newIncident.type,
           category: newIncident.type.toLowerCase().includes('accident') || newIncident.type.toLowerCase().includes('hse') || newIncident.type.toLowerCase().includes('pollution') ? 'hse' : 'quality',
           // Mapper 'Moyen' vers 'Modéré' (ENUM DB: Mineur/Modéré/Grave/Critique)
-          gravity: newIncident.gravity === 'Moyen' ? 'Modéré' : (newIncident.gravity || 'Mineur'),
+          gravity: mapGravityToDb(newIncident.gravity),
           title: incidentTitle,
           description: newIncident.desc,
           incidentDate: new Date().toISOString().split('T')[0],
@@ -169,7 +207,7 @@ export const ControlPage = () => {
           status: 'Ouvert',
           actionPlan: 'Analyse en cours par le responsable HSE.',
           impact: 'Évaluation de l\'impact en cours.',
-          imageFile: incidentFile
+          imageFiles: incidentFiles
         });
         addLog({
           module: 'Contrôle',
@@ -180,14 +218,14 @@ export const ControlPage = () => {
         notify(`Incident "${incidentTitle}" déclaré avec succès.`, 'warning', '/control');
         setIsIncidentModalOpen(false);
         setIncidentStep(1);
-        setIncidentImage(null);
-        setIncidentFile(null);
+        setIncidentImages([]);
+        setIncidentFiles([]);
         setNewIncident({
           type: 'Accident de travail',
           gravity: 'Moyen',
           projectId: projects[0]?.id || 0,
           desc: '',
-          title: ''
+          title: '',
         });
       } catch (err: any) {
         notify(err?.message || 'Erreur lors de la déclaration de l\'incident', 'error');
@@ -257,13 +295,13 @@ export const ControlPage = () => {
           <p className="text-slate-500 font-medium mt-1">Garantir la sécurité des hommes et la qualité des ouvrages selon les normes MINTP/MINSANTE</p>
         </div>
         <div className="flex flex-wrap gap-3">
-          {(role === 'Directeur_technique' || role === 'Chef_chantier' || role === 'RH') && (
+          {(role === 'Chef_chantier' || role === 'Chef_chantier' || role === 'Chef_chantier') && (
             <Button variant="outline" onClick={() => setIsAuditModalOpen(true)} className="bg-white border-slate-200 h-12 px-6 font-bold">
               <ClipboardCheck className="w-5 h-5 mr-2" />
               {t('control.new_check')}
             </Button>
           )}
-          {(role === 'Chef_chantier' || role === 'Technicien_chantier' || role === 'RH') && (
+          {(role === 'Chef_chantier' || role === 'Chef_chantier') && (
             <Button variant="danger" onClick={() => setIsIncidentModalOpen(true)} className="shadow-lg shadow-red-900/20 h-12 px-6 font-bold">
               <AlertTriangle className="w-5 h-5 mr-2" />
               {t('control.new_incident')}
@@ -280,27 +318,20 @@ export const ControlPage = () => {
           </div>
           <div className="flex-1">
             <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">{t('control.filter_by_site')}</p>
-            {role === 'Technicien_chantier' ? (
-              <div className="flex items-center gap-2 text-sm font-black text-slate-900">
-                <Building2 className="w-4 h-4 text-[var(--color-primary)]" />
-                <span>{getProjectNameById(technicianProjectId) || "Non assigné"}</span>
-              </div>
-            ) : (
-              <select
-                value={selectedProjectFilter ?? ''}
-                onChange={(e) => setSelectedProjectFilter(e.target.value ? Number(e.target.value) : null)}
-                className="w-full bg-transparent text-sm font-black text-slate-900 outline-none cursor-pointer"
-              >
-                <option value="">Tous les chantiers</option>
-                {projects.map(p => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
-            )}
+            <select
+              value={selectedProjectFilter ?? ''}
+              onChange={(e) => setSelectedProjectFilter(e.target.value ? Number(e.target.value) : null)}
+              className="w-full bg-transparent text-sm font-black text-slate-900 outline-none cursor-pointer"
+            >
+              <option key="filter-all-projects" value="">Tous les chantiers</option>
+              {projects.map(p => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
           </div>
         </Card>
         <ControlKpiCard
-          title="Incidents Ouverts"
+          title={t('control.modals.open_incidents')}
           value={filteredIncidents.filter(i => i.status !== 'Résolu').length.toString()}
           change={filteredIncidents.filter(i => i.status !== 'Résolu').length > 0 ? "+1" : "0"}
           isPositive={filteredIncidents.filter(i => i.status !== 'Résolu').length === 0}
@@ -308,7 +339,7 @@ export const ControlPage = () => {
           color="red"
         />
         <ControlKpiCard
-          title="Controle (Audit)"
+          title={t('control.modals.open_audits')}
           value={filteredAudits.length.toString()}
           change={filteredAudits.length > 0 ? `+${filteredAudits.length}` : "0"}
           isPositive={true}
@@ -398,7 +429,7 @@ export const ControlPage = () => {
                 <div className="flex items-center justify-between pt-4 border-t border-slate-50">
                   <div className="flex items-center gap-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">
                     <span className="flex items-center text-blue-600"><MapPin className="w-3 h-3 mr-1" /> {incident.location}</span>
-                    <span className="flex items-center"><User className="w-3 h-3 mr-1" /> {incident.reporter}</span>
+                    <span className="flex items-center"><User className="w-3 h-3 mr-1" /> {incident.reporter || t('common.modals.not_defined')}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className={cn(
@@ -446,7 +477,7 @@ export const ControlPage = () => {
               </div>
             )}
           </div>
-          {(role === 'Directeur_technique' || role === 'Chef_chantier' || role === 'RH') && (
+          {(role === 'Chef_chantier' || role === 'Chef_chantier' || role === 'Chef_chantier') && (
             <Button
               onClick={() => setIsAuditModalOpen(true)}
               className="w-full mt-8 bg-white text-blue-900 hover:bg-blue-50 font-bold border-none"
@@ -477,7 +508,7 @@ export const ControlPage = () => {
               <p className="text-center py-4 text-slate-400 text-xs font-bold italic">{t('control.no_checklist')}</p>
             )}
           </div>
-          {(role === 'Directeur_technique' || role === 'Chef_chantier') && (
+          {(role === 'Chef_chantier' || role === 'Chef_chantier') && (
             <Button variant="outline" className="w-full mt-8 border-slate-200 text-slate-500 hover:text-[var(--color-primary)] hover:bg-slate-50 font-bold" onClick={() => setIsNewChecklistModalOpen(true)}>
               <Plus className="w-4 h-4 mr-2" /> {t('control.create_checklist')}
             </Button>
@@ -632,7 +663,7 @@ export const ControlPage = () => {
               onChange={(e) => setNewStatus(e.target.value)}
               className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
             >
-              <option value="">Sélectionner un statut...</option>
+              <option key="status-placeholder" value="">Sélectionner un statut...</option>
               <option value="En cours">En cours</option>
               <option value="Audit requis">Audit requis</option>
               <option value="En attente">En attente</option>
@@ -819,7 +850,7 @@ export const ControlPage = () => {
       <Modal
         isOpen={!!selectedChecklist}
         onClose={() => setSelectedChecklist(null)}
-        title={`Détails Checklist: ${selectedChecklist?.title}`}
+        title={t('control.modals.checklist_details', { title: selectedChecklist?.title })}
         size="md"
       >
         {(() => {
@@ -836,9 +867,9 @@ export const ControlPage = () => {
               <div className="space-y-3">
                 <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-2">Points de Contrôle</h4>
                 <div className="space-y-2">
-                  {currentChecklist.tasks.map((task: any) => (
+                  {currentChecklist.tasks.map((task: any, taskIdx: number) => (
                     <div
-                      key={task.id}
+                      key={task.id != null && task.id !== '' ? `task-${currentChecklist.id}-${task.id}` : `task-${currentChecklist.id}-${taskIdx}`}
                       className="flex items-center justify-between p-3 bg-white border border-slate-100 rounded-xl hover:border-[var(--color-primary)] transition-all cursor-pointer"
                       onClick={() => toggleChecklistTask(currentChecklist.id, task.id)}
                     >
@@ -871,7 +902,7 @@ export const ControlPage = () => {
       <Modal
         isOpen={isEditChecklistModalOpen}
         onClose={() => setIsEditChecklistModalOpen(false)}
-        title="Modifier la Checklist"
+        title={t('control.modals.edit_checklist')}
         size="sm"
       >
         <div className="space-y-6">
@@ -1037,7 +1068,7 @@ export const ControlPage = () => {
               </div>
               <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Déclaré par</p>
-                <p className="text-sm font-bold text-slate-900 flex items-center"><User className="w-3 h-3 mr-2" /> {selectedIncident.reporter}</p>
+                <p className="text-sm font-bold text-slate-900 flex items-center"><User className="w-3 h-3 mr-2" /> {selectedIncident.reporter || t('common.modals.not_defined')}</p>
               </div>
               <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">{t('control.incident_date')}</p>
@@ -1048,14 +1079,15 @@ export const ControlPage = () => {
             <div className="space-y-4">
               <h4 className="text-sm font-black text-slate-900 uppercase tracking-tight border-b border-slate-100 pb-2">{t('control.facts')}</h4>
               <p className="text-sm text-slate-600 leading-relaxed">{selectedIncident.desc}</p>
-              {selectedIncident.image && (
+              {(selectedIncident.images?.length || selectedIncident.image) && (
                 <div className="mt-4">
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">{t('control.photo_proof')}</p>
-                  <img
-                    src={selectedIncident.image.startsWith('http') ? selectedIncident.image : `${import.meta.env.VITE_API_URL || ''}${selectedIncident.image}`}
-                    alt="Preuve incident"
-                    className="w-full h-64 object-cover rounded-2xl border border-slate-100"
-                    referrerPolicy="no-referrer"
+                  <ReportPhotos
+                    images={
+                      selectedIncident.images?.length
+                        ? selectedIncident.images
+                        : [selectedIncident.image]
+                    }
+                    reportId={selectedIncident.id}
                   />
                 </div>
               )}
@@ -1085,7 +1117,7 @@ export const ControlPage = () => {
 
             <div className="pt-6 border-t border-slate-100 flex justify-end gap-3">
               <Button variant="outline" onClick={() => setSelectedIncident(null)} className="font-bold">{t('common.close')}</Button>
-              {(role === 'Directeur_technique' || role === 'Chef_chantier' || role === 'RH') && (
+              {(role === 'Chef_chantier' || role === 'Chef_chantier' || role === 'Chef_chantier') && (
                 <Button className="font-bold shadow-lg shadow-blue-900/20" onClick={() => setIsStatusUpdateModalOpen(true)}>{t('control.update_status')}</Button>
               )}
             </div>
@@ -1096,8 +1128,13 @@ export const ControlPage = () => {
       {/* Incident Modal (Workflow) */}
       <Modal
         isOpen={isIncidentModalOpen}
-        onClose={() => setIsIncidentModalOpen(false)}
-        title="Déclaration d'Incident Chantier - Cameroun"
+        onClose={() => {
+          setIsIncidentModalOpen(false);
+          setIncidentStep(1);
+          setIncidentImages([]);
+          setIncidentFiles([]);
+        }}
+        title={t('control.declare_incident')}
         size="lg"
       >
         <div className="space-y-8">
@@ -1164,10 +1201,14 @@ export const ControlPage = () => {
                   <div className="space-y-1.5">
                     <label className="text-sm font-bold text-slate-700">{t('control.site_concerned')}</label>
                     <select
-                      value={newIncident.projectId}
+                      value={newIncident.projectId || ''}
                       onChange={(e) => setNewIncident({ ...newIncident, projectId: Number(e.target.value) })}
                       className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-red-500"
+                      required
                     >
+                      {!projects.length && (
+                        <option value="">{t('control.no_site_available')}</option>
+                      )}
                       {projects.map(p => (
                         <option key={p.id} value={p.id}>{p.name}</option>
                       ))}
@@ -1187,31 +1228,56 @@ export const ControlPage = () => {
                       required
                     ></textarea>
                   </div>
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700">{t('control.photo_proof')}</label>
-                    <div
-                      className={cn(
-                        "relative p-8 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center transition-all cursor-pointer overflow-hidden",
-                        incidentImage ? "border-red-500 bg-red-50/10" : "border-slate-200 text-slate-400 hover:border-red-500 hover:text-red-500 bg-slate-50/50"
-                      )}
-                      onClick={() => document.getElementById('incident-image-upload')?.click()}
-                    >
-                      {incidentImage ? (
-                        <img src={incidentImage} alt="Preview" className="absolute inset-0 w-full h-full object-cover opacity-50" referrerPolicy="no-referrer" />
-                      ) : (
+                  <div className="space-y-2">
+                    <label className="text-sm font-bold text-slate-700">
+                      {t('control.photo_proof')} ({t('control.photos_optional_max')})
+                    </label>
+                    <input
+                      id="incident-image-upload"
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      className="block w-full text-sm text-slate-600 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-slate-100 file:font-bold"
+                      onChange={handleImagesChange}
+                    />
+                    {incidentImages.length === 0 ? (
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => document.getElementById('incident-image-upload')?.click()}
+                        onKeyDown={(e) => e.key === 'Enter' && document.getElementById('incident-image-upload')?.click()}
+                        className="p-8 border-2 border-dashed border-slate-200 rounded-2xl flex flex-col items-center justify-center text-slate-400 hover:border-red-500 hover:text-red-500 bg-slate-50/50 cursor-pointer transition-all"
+                      >
                         <Camera className="w-10 h-10 mb-2" />
-                      )}
-                      <p className="text-[10px] font-black uppercase tracking-widest relative z-10">
-                        {incidentImage ? "Changer la photo" : "t('control.photo_proof') / Vidéo"}
-                      </p>
-                      <input
-                        id="incident-image-upload"
-                        type="file"
-                        accept="image/*"
-                        className="hidden"
-                        onChange={handleImageChange}
-                      />
-                    </div>
+                        <p className="text-[10px] font-black uppercase tracking-widest">{t('control.add_photos')}</p>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                        {incidentImages.map((src, i) => (
+                          <div key={`incident-preview-${i}`} className="relative group flex items-center justify-center h-24 bg-slate-50 rounded-lg border border-slate-200">
+                            <img src={src} alt="" className="max-w-full max-h-24 object-contain p-1" referrerPolicy="no-referrer" />
+                            <button
+                              type="button"
+                              className="absolute top-1 right-1 w-6 h-6 bg-red-500 text-white text-xs rounded-full opacity-90"
+                              onClick={() => removeIncidentPhoto(i)}
+                              aria-label={t('common.delete')}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                        {incidentImages.length < 10 && (
+                          <button
+                            type="button"
+                            onClick={() => document.getElementById('incident-image-upload')?.click()}
+                            className="h-24 border-2 border-dashed border-slate-200 rounded-lg flex flex-col items-center justify-center text-slate-400 hover:border-red-500 hover:text-red-500"
+                          >
+                            <Camera className="w-5 h-5" />
+                            <span className="text-[9px] font-bold mt-1">{t('control.add_photos')}</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1222,23 +1288,23 @@ export const ControlPage = () => {
                 <div className="w-20 h-20 bg-red-50 text-red-600 rounded-full flex items-center justify-center mx-auto mb-6">
                   <AlertTriangle className="w-10 h-10" />
                 </div>
-                <h4 className="text-2xl font-black text-slate-900 tracking-tight">Rapport d'Incident Envoyé</h4>
-                <p className="text-slate-500 font-medium max-w-xs mx-auto">Le rapport a été transmis au Responsable HSE et à la Direction Générale pour action immédiate.</p>
+                <h4 className="text-2xl font-black text-slate-900 tracking-tight">{t('control.incident_sent_title')}</h4>
+                <p className="text-slate-500 font-medium max-w-xs mx-auto">{t('control.incident_sent_desc')}</p>
               </div>
             )}
 
             <div className="pt-6 border-t border-slate-100 flex justify-between">
               <Button variant="outline" type="button" onClick={() => incidentStep > 1 ? setIncidentStep(1) : setIsIncidentModalOpen(false)} className="font-bold h-12 px-6">
-                {incidentStep === 1 ? 'Annuler' : 'Précédent'}
+                {incidentStep === 1 ? t('common.cancel') : t('common.modals.previous')}
               </Button>
               <Button variant="danger" type="submit" className="px-8 font-bold h-12 shadow-lg shadow-red-900/20" disabled={isSubmittingIncident}>
                 {isSubmittingIncident ? (
                   <>
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                    Traitement...
+                    {t('common.modals.processing')}
                   </>
                 ) : (
-                  incidentStep === 2 ? 'Fermer' : 'Envoyer le Rapport'
+                  incidentStep === 2 ? t('common.close') : t('control.send_report')
                 )}
               </Button>
             </div>

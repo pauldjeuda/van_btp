@@ -5,7 +5,11 @@ import { defineConfig, loadEnv } from 'vite';
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '');
-  const apiUrl = env.VITE_API_URL || 'http://localhost:3001';
+  // En dev : proxy vers backend local (logistique IP privée joignable depuis CE backend)
+  const apiUrl =
+    mode === 'development'
+      ? env.VITE_DEV_API_URL || 'http://localhost:3001'
+      : env.VITE_API_URL || 'http://localhost:3001';
 
   return {
     plugins: [react(), tailwindcss()],

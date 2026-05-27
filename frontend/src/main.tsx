@@ -2,12 +2,22 @@ import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
+import { isVanRhDataSource, loadIntegrationConfig } from './lib/integrationConfig';
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+async function bootstrap() {
+  await loadIntegrationConfig();
+  if (isVanRhDataSource()) {
+    console.log('🔌 Mode données : VAN RH (URL depuis backend/.env → VAN_RH_URL)');
+  }
+
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+}
+
+bootstrap();
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {

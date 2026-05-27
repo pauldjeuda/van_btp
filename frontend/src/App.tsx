@@ -6,6 +6,7 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { UserProvider, useUser } from './context/UserContext';
+import { getHomePathForRole, canAccessDashboard } from './lib/defaultRoute';
 import { ThemeProvider } from './context/ThemeContext';
 import { DataProvider } from './context/DataContext';
 import { HistoryProvider } from './context/HistoryContext';
@@ -15,6 +16,7 @@ import { NotificationProvider } from './context/NotificationContext';
 import { LoginPage, RegisterPage, ForgotPasswordPage } from './pages/Auth/Auth';
 import { Dashboard } from './pages/Dashboard/Dashboard';
 import { ProjectsPage } from './pages/Projects/Projects';
+import { ProjectDetailPage } from './pages/Projects/ProjectDetailPage';
 import { FinancesPage } from './pages/Finances/Finances';
 import { ResourcesPage } from './pages/Resources/Resources';
 import { ControlPage } from './pages/Control/Control';
@@ -48,6 +50,19 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   return <>{children}</>;
 };
 
+const HomeRedirect = () => {
+  const { role } = useUser();
+  return <Navigate to={getHomePathForRole(role)} replace />;
+};
+
+const DashboardRoute = () => {
+  const { role } = useUser();
+  if (!canAccessDashboard(role)) {
+    return <Navigate to={getHomePathForRole(role)} replace />;
+  }
+  return <Dashboard />;
+};
+
 export default function App() {
   return (
     <ThemeProvider>
@@ -64,9 +79,10 @@ export default function App() {
 
                   {/* App Routes — protégées par rôle */}
                   <Route path="/" element={<ProtectedRoute><MainLayout /></ProtectedRoute>}>
-                    <Route index element={<Navigate to="/dashboard" replace />} />
-                    <Route path="dashboard" element={<Dashboard />} />
+                    <Route index element={<HomeRedirect />} />
+                    <Route path="dashboard" element={<DashboardRoute />} />
                     <Route path="projects" element={<ProjectsPage />} />
+                    <Route path="projects/:projectId" element={<ProjectDetailPage />} />
                     <Route path="finances" element={<FinancesPage />} />
                     <Route path="resources" element={<ResourcesPage />} />
                     <Route path="control" element={<ControlPage />} />
@@ -77,7 +93,7 @@ export default function App() {
                   </Route>
 
                   {/* Fallback */}
-                  <Route path="*" element={<Navigate to="/dashboard" replace />} />
+                  <Route path="*" element={<HomeRedirect />} />
                 </Routes>
               </NotificationProvider>
             </BrowserRouter>

@@ -5,10 +5,6 @@ const { success, created, notFound, error, badRequest } = require('../utils/resp
 exports.getAll = asyncHandler(async (req, res) => {
   const where = {};
   if (req.query.projectId) where.projectId = req.query.projectId;
-  if (req.role === 'Technicien_chantier') {
-    const emp = await db.Employee.findOne({ where: { matricule: req.user.matricule } });
-    if (emp?.projectId) where.projectId = emp.projectId;
-  }
   const checklists = await db.Checklist.findAll({
     where,
     include: [

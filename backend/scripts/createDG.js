@@ -13,14 +13,14 @@ const createDG = async () => {
     await sequelize.authenticate();
     await sequelize.sync({ alter: true });
 
-    const existing = await db.Directeur_technique.findOne({ where: { matricule: 'VMAT0001' } });
+    const existing = await db['Directeur technique'].findOne({ where: { matricule: 'VMAT0001' } });
     if (existing) {
       console.log('⚠️  Le compte DG (VMAT0001) existe déjà.');
       process.exit(0);
     }
 
     const hashed = await bcrypt.hash('admin123', 12);
-    const dg = await db.Directeur_technique.create({
+    const dg = await db['Directeur technique'].create({
       matricule: 'VMAT0001',
       nom: 'Abena',
       prenom: 'Paul',

@@ -1,7 +1,7 @@
 /**
  * Modèle de base générique pour les 4 rôles utilisateurs VAN BTP.
  * Inspiré du pattern de l'exemple backend_rh.
- * Chaque rôle (DG, Chef, Technicien, RH) partage ces champs communs.
+ * Chaque rôle applicatif partage ces champs communs.
  */
 const { DataTypes } = require('sequelize');
 const sequelize = require('../config/db');

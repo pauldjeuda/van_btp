@@ -4,7 +4,9 @@
  * Architecture Ultra-Stable (LocalStorage) inspirée de Claude9.
  */
 
-const BASE_URL = import.meta.env.VITE_API_URL || '';
+import { resolveApiBaseUrl } from '../lib/apiBaseUrl';
+
+const BASE_URL = resolveApiBaseUrl();
 const TOKEN_KEY = 'van_btp_token';
 const USER_KEY = 'van_btp_user';
 const ROLE_KEY = 'van_btp_role';

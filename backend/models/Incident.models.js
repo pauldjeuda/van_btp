@@ -18,6 +18,7 @@ const Incident = sequelize.define('Incident', {
   actionPlan: { type: DataTypes.TEXT },
   impact: { type: DataTypes.TEXT },
   imageUrl: { type: DataTypes.STRING(255) },
+  images: { type: DataTypes.JSON, allowNull: true, defaultValue: [] },
   incidentDate: { type: DataTypes.DATEONLY, allowNull: false },
   projectId: { type: DataTypes.INTEGER, allowNull: false },
   reporterId: { type: DataTypes.INTEGER },

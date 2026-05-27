@@ -18,17 +18,18 @@ const verifyTokenOrQuery = (req, res, next) => {
   return verifyToken(req, res, next);
 };
 
-router.get('/',
-  verifyToken, verifyRole(['Directeur_technique', 'Chef_chantier', 'Technicien_chantier', 'RH']), ctrl.getAll);
+const DOC_ROLES = ['Directeur technique', 'Chef_chantier'];
+
+router.get('/', verifyToken, verifyRole(DOC_ROLES), ctrl.getAll);
 
 router.post('/',
-  verifyToken, verifyRole(['Chef_chantier', 'Technicien_chantier']),
+  verifyToken, verifyRole(DOC_ROLES),
   setDocumentFolder, upload.single('file'), ctrl.upload);
 
 router.get('/:id/download',
-  verifyTokenOrQuery, verifyRole(['Directeur_technique', 'Chef_chantier', 'Technicien_chantier', 'RH']), ctrl.download);
+  verifyTokenOrQuery, verifyRole(DOC_ROLES), ctrl.download);
 
 router.delete('/:id',
-  verifyToken, verifyRole(['Chef_chantier']), ctrl.remove);
+  verifyToken, verifyRole(DOC_ROLES), ctrl.remove);
 
 module.exports = router;

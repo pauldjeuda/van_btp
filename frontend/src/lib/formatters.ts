@@ -5,24 +5,68 @@
  */
 
 /**
+ * Parse une valeur numérique (string DECIMAL API, number, null).
+ */
+export const parseAmount = (value: unknown): number => {
+  if (value == null || value === '') return 0;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  const n = parseFloat(String(value).replace(/\s/g, '').replace(',', '.'));
+  return Number.isFinite(n) ? n : 0;
+};
+
+/**
  * Formate un montant en FCFA avec séparateurs de milliers.
  * Ex: 15000000 → "15 000 000 FCFA"
  */
-export const formatCFA = (amount: number): string => {
+export const formatCFA = (amount: number | string | null | undefined): string => {
   return new Intl.NumberFormat('fr-FR', {
     style: 'currency',
     currency: 'XAF',
     minimumFractionDigits: 0,
     maximumFractionDigits: 0,
-  }).format(amount);
+  }).format(parseAmount(amount));
 };
 
 /**
- * Formate un nombre avec séparateurs de milliers (sans devise).
- * Ex: 1500000 → "1 500 000"
+ * Formate un nombre avec séparateurs FR (sans décimales inutiles).
+ * Ex: 1500000 → "1 500 000" ; 2.0000 → "2" ; 2.5 → "2,5" (si maxFractionDigits ≥ 1)
  */
-export const formatNumber = (value: number): string => {
-  return new Intl.NumberFormat('fr-FR').format(value);
+export const formatNumber = (
+  value: number | string | null | undefined,
+  maxFractionDigits = 0,
+): string => {
+  return new Intl.NumberFormat('fr-FR', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: maxFractionDigits,
+  }).format(parseAmount(value));
+};
+
+/**
+ * Quantités physiques (stock, production, recettes) — max 4 décimales, sans zéros trailing.
+ * Ex: "2.0000" → "2" ; 1500.25 → "1 500,25"
+ */
+export const formatQuantity = (
+  value: number | string | null | undefined,
+  maxFractionDigits = 4,
+): string => formatNumber(value, maxFractionDigits);
+
+/**
+ * Affiche quantité + unité. Ex: formatQuantityWithUnit(2, "kg") → "2 kg"
+ */
+export const formatQuantityWithUnit = (
+  value: number | string | null | undefined,
+  unit?: string | null,
+  maxFractionDigits = 4,
+): string => {
+  const qty = formatQuantity(value, maxFractionDigits);
+  const u = unit?.trim();
+  return u ? `${qty} ${u}` : qty;
+};
+
+/** Clé React stable pour les listes (évite les doublons quand id est null, undefined ou ''). */
+export const listKey = (id: unknown, index: number, prefix = 'item'): string => {
+  if (id != null && id !== '') return String(id);
+  return `${prefix}-${index}`;
 };
 
 /**
@@ -53,7 +97,7 @@ export const formatDateShort = (dateStr: string): string => {
  */
 export const formatPercent = (value: number, total: number): string => {
   if (!total) return '0 %';
-  return `${Math.round((value / total) * 100)} %`;
+  return `${Math.round((parseAmount(value) / parseAmount(total)) * 100)} %`;
 };
 
 /**

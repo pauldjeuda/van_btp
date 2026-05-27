@@ -4,6 +4,6 @@ const ctrl    = require('../controllers/dashboard.controller');
 const verifyToken = require('../middlewares/verifyToken');
 const verifyRole  = require('../middlewares/verifyRole');
 
-router.get('/', verifyToken, verifyRole(['Directeur_technique', 'Chef_chantier', 'Technicien_chantier', 'RH']), ctrl.getKPIs);
+router.get('/', verifyToken, verifyRole(['Directeur technique']), ctrl.getKPIs);
 
 module.exports = router;

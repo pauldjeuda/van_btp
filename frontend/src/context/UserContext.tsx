@@ -5,7 +5,11 @@ import React, {
 import { authService } from '../services/auth.service';
 import { employeeRHService, EmployeeRH } from '../services/employeeRH.service';
 
-export type Role = 'Directeur_technique' | 'Chef_chantier' | 'Technicien_chantier' | 'RH';
+export type Role =
+  | 'Directeur technique'
+  | 'Chef_chantier'
+  | 'Gerant_production'
+  | 'Gestionnaire de stocks';
 
 export interface UserProfile {
   matricule: string;

@@ -21,7 +21,11 @@ const errorHandler = (err, req, res, _next) => {
 
   // Erreur Sequelize : clé étrangère
   if (err.name === 'SequelizeForeignKeyConstraintError') {
-    return error(res, 'Référence invalide — ressource liée introuvable', 400);
+    const field = err.fields?.[0] || err.index || '';
+    const hint = String(field).includes('projectId') || err.parent?.sqlMessage?.includes('projectId')
+      ? 'Chantier introuvable ou non sélectionné'
+      : 'Référence invalide — ressource liée introuvable';
+    return error(res, hint, 400);
   }
 
   // Erreur Multer : fichier trop grand

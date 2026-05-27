@@ -1,13 +1,17 @@
 const express    = require('express');
 const router     = express.Router();
 const ctrl       = require('../controllers/project.controller');
+const kpiCtrl    = require('../controllers/projectKpi.controller');
 const verifyToken = require('../middlewares/verifyToken');
 const verifyRole  = require('../middlewares/verifyRole');
 
-router.get('/',     verifyToken, verifyRole(['Directeur_technique', 'Chef_chantier', 'Technicien_chantier', 'RH']), ctrl.getAll);
-router.get('/:id',  verifyToken, verifyRole(['Directeur_technique', 'Chef_chantier', 'Technicien_chantier']),       ctrl.getById);
-router.post('/',    verifyToken, verifyRole(['Directeur_technique', 'Chef_chantier']),                      ctrl.create);
-router.put('/:id',  verifyToken, verifyRole(['Directeur_technique', 'Chef_chantier']),                     ctrl.update);
-router.delete('/:id', verifyToken, verifyRole(['Directeur_technique', 'Chef_chantier']),                   ctrl.remove);
+const { PROJECTS_READ, DG_ONLY } = require('../utils/roles');
+
+router.get('/',     verifyToken, verifyRole(PROJECTS_READ), ctrl.getAll);
+router.get('/:id/kpis', verifyToken, verifyRole(PROJECTS_READ), kpiCtrl.getByProject);
+router.get('/:id',  verifyToken, verifyRole(PROJECTS_READ), ctrl.getById);
+router.post('/',    verifyToken, verifyRole(DG_ONLY), ctrl.create);
+router.put('/:id',  verifyToken, verifyRole(DG_ONLY), ctrl.update);
+router.delete('/:id', verifyToken, verifyRole(DG_ONLY), ctrl.remove);
 
 module.exports = router;

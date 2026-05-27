@@ -15,6 +15,7 @@ const DailyReport = sequelize.define('DailyReport', {
   projectId: { type: DataTypes.INTEGER, allowNull: false },
   reporterId: { type: DataTypes.INTEGER },
   reporter: { type: DataTypes.STRING },
+  images: { type: DataTypes.JSON, allowNull: true, defaultValue: [] },
 }, { tableName: 'daily_reports', timestamps: true, paranoid: true });
 
 module.exports = DailyReport;

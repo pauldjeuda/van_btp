@@ -2,6 +2,8 @@ const { Op }       = require('sequelize');
 const db           = require('../models');
 const asyncHandler = require('../middlewares/asyncHandler');
 const { success }  = require('../utils/response');
+const approvalService = require('../services/approval.service');
+const { resolveChefProjectIds } = require('../utils/chefProjectAccess');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -16,8 +18,11 @@ const filterBy = (arr, key, val) =>
 exports.getKPIs = asyncHandler(async (req, res) => {
   const { role, user } = req;
 
-  const projectWhere = {};
-  if (role === 'Chef_chantier') projectWhere.chefId = user.id;
+  let projectWhere = {};
+  if (role === 'Chef_chantier') {
+    const projectIds = await resolveChefProjectIds(user);
+    projectWhere = projectIds.length ? { id: { [Op.in]: projectIds } } : { id: -1 };
+  }
 
   // ── Projets ────────────────────────────────────────────────────────────────
   const projects    = await db.Project.findAll({ where: projectWhere });
@@ -77,10 +82,41 @@ exports.getKPIs = asyncHandler(async (req, res) => {
 
   // ── Logs récents ───────────────────────────────────────────────────────────
   const recentLogs = await db.Log.findAll({
-    where: role !== 'Directeur_technique' ? { userId: user.id } : {},
+    where: role !== 'Chef_chantier' ? { userId: user.id } : {},
     order: [['createdAt', 'DESC']],
     limit: 10,
   });
+
+  let pendingApprovals = {
+    items: [],
+    counts: { total: 0, amendment: 0, purchase: 0, expense: 0, quote: 0 },
+  };
+  let recentSiteReports = { count: 0, items: [] };
+  if (role === 'Directeur technique') {
+    pendingApprovals = await approvalService.fetchPendingItems();
+  }
+  if (role === 'Chef_chantier') {
+    const reports = await db.DailyReport.findAll({
+      include: [{ model: db.Project, as: 'project', attributes: ['id', 'name', 'code'] }],
+      order: [['reportDate', 'DESC']],
+      limit: 15,
+    });
+    recentSiteReports = {
+      count: await db.DailyReport.count(),
+      items: reports.map((r) => ({
+        id: r.id,
+        reportDate: r.reportDate,
+        projectId: r.projectId,
+        projectName: r.project?.name || 'Chantier',
+        reporter: r.reporter,
+        status: r.status,
+        workDone: (r.workDone || '').slice(0, 120),
+        issuesEncountered: (r.issuesEncountered || '').slice(0, 80),
+        imageCount: Array.isArray(r.images) ? r.images.length : 0,
+        hasImages: Array.isArray(r.images) && r.images.length > 0,
+      })),
+    };
+  }
 
   return success(res, {
     role,
@@ -89,5 +125,7 @@ exports.getKPIs = asyncHandler(async (req, res) => {
     personnel:      employeeStats,
     incidents:      incidentStats,
     recentActivity: recentLogs,
+    pendingApprovals,
+    recentSiteReports,
   });
 });

@@ -15,8 +15,18 @@ const REFRESH_SECRET     = process.env.JWT_REFRESH_SECRET     || crypto.randomBy
 
 // ─── Clés RSA par rôle (access token) ────────────────────────────────────────
 
+/** Dossiers .private existants (ancien nom directeur_technique conservé). */
+const ROLE_RSA_DIRS = {
+  'directeur technique': 'directeur_technique',
+  'directeur_technique': 'directeur_technique',
+  'gestionnaire de stocks': 'gerant_stock',
+  gerant_stock: 'gerant_stock',
+};
+
+const getRoleKeyDir = (role) => ROLE_RSA_DIRS[role.toLowerCase()] ?? role.toLowerCase();
+
 const getKeys = (role) => {
-  const dir         = path.join(__dirname, '../.private', role.toLowerCase());
+  const dir         = path.join(__dirname, '../.private', getRoleKeyDir(role));
   const privatePath = path.join(dir, 'private.pem');
   const publicPath  = path.join(dir, 'public.pem');
 

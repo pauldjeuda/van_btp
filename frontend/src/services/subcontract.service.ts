@@ -10,5 +10,10 @@ export const subcontractService = {
   create: async (payload: any) => (await api.post<{ data: any }>('/api/subcontracts', payload)).data,
   update: async (id: number, payload: any) => (await api.put<{ data: any }>(`/api/subcontracts/${id}`, payload)).data,
   toggleTask: async (id: number, taskId: string) => (await api.patch<{ data: any }>(`/api/subcontracts/${id}/tasks/${taskId}/toggle`, {})).data,
+  payCompletedTasks: async (id: number) =>
+    (await api.post<{ data: { subcontract: any; amount: number; paidTaskIds: number[] } }>(
+      `/api/subcontracts/${id}/pay-completed-tasks`,
+      {},
+    )).data,
   remove: async (id: number) => { await api.delete(`/api/subcontracts/${id}`); },
 };

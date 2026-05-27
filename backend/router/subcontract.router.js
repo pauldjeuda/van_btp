@@ -4,10 +4,13 @@ const ctrl    = require('../controllers/subcontract.controller');
 const verifyToken = require('../middlewares/verifyToken');
 const verifyRole  = require('../middlewares/verifyRole');
 
-router.get('/',                          verifyToken, verifyRole(['Directeur_technique', 'Chef_chantier']), ctrl.getAll);
-router.post('/',                          verifyToken, verifyRole(['Directeur_technique', 'Chef_chantier']),        ctrl.create);
-router.put('/:id',                        verifyToken, verifyRole(['Directeur_technique', 'Chef_chantier']),        ctrl.update);
-router.patch('/:id/tasks/:taskId/toggle', verifyToken, verifyRole(['Directeur_technique', 'Chef_chantier']), ctrl.toggleTask);
-router.delete('/:id',                     verifyToken, verifyRole(['Chef_chantier']),        ctrl.remove);
+const { MANAGEMENT, DG_ONLY } = require('../utils/roles');
+
+router.get('/',                          verifyToken, verifyRole(MANAGEMENT), ctrl.getAll);
+router.post('/',                          verifyToken, verifyRole(DG_ONLY), ctrl.create);
+router.put('/:id',                        verifyToken, verifyRole(DG_ONLY), ctrl.update);
+router.delete('/:id',                     verifyToken, verifyRole(DG_ONLY), ctrl.remove);
+router.post('/:id/pay-completed-tasks', verifyToken, verifyRole(MANAGEMENT), ctrl.payCompletedTasks);
+router.patch('/:id/tasks/:taskId/toggle', verifyToken, verifyRole(MANAGEMENT), ctrl.toggleTask);
 
 module.exports = router;

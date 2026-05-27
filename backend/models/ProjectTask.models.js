@@ -17,6 +17,8 @@ const ProjectTask = sequelize.define('ProjectTask', {
     defaultValue: 'Normale',
   },
   progress:  { type: DataTypes.INTEGER, defaultValue: 0, validate: { min: 0, max: 100 } },
+  blockedReason: { type: DataTypes.TEXT },
+  position:  { type: DataTypes.INTEGER, defaultValue: 0 },
   startDate: { type: DataTypes.DATEONLY },
   dueDate:   { type: DataTypes.DATEONLY },
   createdBy: { type: DataTypes.INTEGER },

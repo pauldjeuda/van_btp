@@ -11,8 +11,12 @@ const StockMovement = sequelize.define('StockMovement', {
   // Magasin source / destination
   warehouse: { type: DataTypes.STRING(100), defaultValue: 'Magasin Principal' },
   projectId: { type: DataTypes.INTEGER, allowNull: true },
+  materialId: { type: DataTypes.INTEGER, allowNull: true },
   createdBy: { type: DataTypes.INTEGER },
   note: { type: DataTypes.TEXT },
+  sourceType: { type: DataTypes.STRING(40), allowNull: true },
+  sourceId: { type: DataTypes.INTEGER, allowNull: true },
+  unitCost: { type: DataTypes.DECIMAL(12, 2), allowNull: true },
 }, { tableName: 'stock_movements', timestamps: true, paranoid: true });
 
 module.exports = StockMovement;

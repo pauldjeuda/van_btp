@@ -3,23 +3,37 @@
  * Composants réutilisables et utilitaires pour la page Finances.
  */
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { cn } from '../../components/ui';
 
 export const fmt = (n: number) => new Intl.NumberFormat('fr-FR').format(Math.round(n));
 
+const STATUS_KEYS: Record<string, string> = {
+  'Payé': 'finances.status.paid',
+  'En attente': 'finances.status.pending',
+  'Validé': 'finances.status.validated',
+  'Rejeté': 'finances.status.rejected',
+  'Non remboursé': 'finances.status.unpaid',
+  'Partiellement remboursé': 'finances.status.partial_refund',
+  'Remboursé': 'finances.status.refunded',
+};
+
+const STATUS_CFG: Record<string, string> = {
+  'Payé': 'bg-emerald-100 text-emerald-700',
+  'En attente': 'bg-amber-100 text-amber-700',
+  'Validé': 'bg-blue-100 text-blue-700',
+  'Rejeté': 'bg-red-100 text-red-700',
+  'Non remboursé': 'bg-red-100 text-red-700',
+  'Partiellement remboursé': 'bg-blue-100 text-blue-700',
+  'Remboursé': 'bg-emerald-100 text-emerald-700',
+};
+
 export const StatusBadge = ({ status }: { status: string }) => {
-  const cfg: Record<string, string> = {
-    'Payé': 'bg-emerald-100 text-emerald-700',
-    'En attente': 'bg-amber-100 text-amber-700',
-    'Validé': 'bg-blue-100 text-blue-700',
-    'Rejeté': 'bg-red-100 text-red-700',
-    'Non remboursé': 'bg-red-100 text-red-700',
-    'Partiellement remboursé': 'bg-blue-100 text-blue-700',
-    'Remboursé': 'bg-emerald-100 text-emerald-700',
-  };
+  const { t } = useTranslation();
+  const label = STATUS_KEYS[status] ? t(STATUS_KEYS[status]) : status;
   return (
-    <span className={`text-xs font-bold px-2 py-0.5 rounded-full whitespace-nowrap ${cfg[status] || 'bg-slate-100 text-slate-600'}`}>
-      {status}
+    <span className={`text-xs font-bold px-2 py-0.5 rounded-full whitespace-nowrap ${STATUS_CFG[status] || 'bg-slate-100 text-slate-600'}`}>
+      {label}
     </span>
   );
 };
@@ -39,12 +53,14 @@ export const MarginBar = ({ value }: { value: number }) => {
 };
 
 export const AlertBadge = ({ alert }: { alert: string }) => {
-  const cfg: Record<string, { label: string; cls: string }> = {
-    ok: { label: 'Sain', cls: 'bg-emerald-100 text-emerald-700' },
-    warning: { label: 'Vigilance', cls: 'bg-amber-100 text-amber-700' },
-    danger: { label: 'Critique', cls: 'bg-red-100 text-red-700' },
-    neutral: { label: 'Sans facture', cls: 'bg-slate-100 text-slate-500' },
+  const { t } = useTranslation();
+  const cfg: Record<string, { key: string; cls: string }> = {
+    ok: { key: 'finances.alerts.ok', cls: 'bg-emerald-100 text-emerald-700' },
+    warning: { key: 'finances.alerts.warning', cls: 'bg-amber-100 text-amber-700' },
+    danger: { key: 'finances.alerts.danger', cls: 'bg-red-100 text-red-700' },
+    neutral: { key: 'finances.alerts.neutral', cls: 'bg-slate-100 text-slate-500' },
   };
-  const { label, cls } = cfg[alert] || { label: alert, cls: 'bg-slate-100 text-slate-600' };
-  return <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${cls}`}>{label}</span>;
+  const { key, cls } = cfg[alert] || { key: '', cls: 'bg-slate-100 text-slate-600' };
+  const label = key ? t(key) : alert;
+  return <span className={cn('text-xs font-bold px-2 py-0.5 rounded-full', cls)}>{label}</span>;
 };

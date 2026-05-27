@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Button, Input, Modal, Drawer, cn } from '../../components/ui';
-import { 
-  Palette, 
-  Bell, 
+import {
+  Palette,
+  Bell,
   Shield,
   Check,
   User,
@@ -176,23 +176,23 @@ export const SettingsPage = () => {
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-10">
         {/* Sidebar Navigation */}
         <div className="space-y-1">
-          <SettingsNavButton 
-            icon={User} 
-            label="Mon Profil" 
-            active={activeSection === 'profile'} 
-            onClick={() => setActiveSection('profile')} 
+          <SettingsNavButton
+            icon={User}
+            label="Mon Profil"
+            active={activeSection === 'profile'}
+            onClick={() => setActiveSection('profile')}
           />
-          <SettingsNavButton 
-            icon={Monitor} 
-            label="Apparence & Thèmes" 
-            active={activeSection === 'appearance'} 
-            onClick={() => setActiveSection('appearance')} 
+          <SettingsNavButton
+            icon={Monitor}
+            label="Apparence & Thèmes"
+            active={activeSection === 'appearance'}
+            onClick={() => setActiveSection('appearance')}
           />
-          <SettingsNavButton 
-            icon={Bell} 
-            label="Notifications" 
-            active={activeSection === 'notifications'} 
-            onClick={() => setActiveSection('notifications')} 
+          <SettingsNavButton
+            icon={Bell}
+            label="Notifications"
+            active={activeSection === 'notifications'}
+            onClick={() => setActiveSection('notifications')}
           />
         </div>
 
@@ -200,7 +200,7 @@ export const SettingsPage = () => {
         <div className="lg:col-span-3 space-y-10">
           <AnimatePresence mode="wait">
             {activeSection === 'profile' && (
-              <motion.div 
+              <motion.div
                 key="profile"
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -219,9 +219,9 @@ export const SettingsPage = () => {
                       </div>
                       <label className="absolute -bottom-2 -right-2 p-2 bg-white border border-slate-100 text-slate-600 rounded-lg shadow-sm hover:bg-slate-50 transition-colors cursor-pointer">
                         <Camera className="w-4 h-4" />
-                        <input 
-                          type="file" 
-                          className="hidden" 
+                        <input
+                          type="file"
+                          className="hidden"
                           accept="image/*"
                           onChange={(e) => {
                             const file = e.target.files?.[0];
@@ -241,19 +241,20 @@ export const SettingsPage = () => {
                       <h2 className="text-xl font-bold text-slate-900">{profile?.name || 'Utilisateur'}</h2>
                       <p className="text-slate-500 text-sm">
                         {profile?.matricule} • {
-                          role === 'Directeur_technique' ? 'Directeur Général' : 
-                          role === 'Chef_chantier' ? 'Chef de Chantier' :
-                          role === 'RH' ? 'RH' :
-                          'Technicien Chantier'
+                          role === 'Directeur technique' ? t('roles.directeur_technique') :
+                            role === 'Chef_chantier' ? t('roles.chef_chantier') :
+                              role === 'Gestionnaire de stocks' ? t('roles.gerant_stock') :
+                                role === 'Gerant_production' ? t('roles.gerant_production') :
+                                  t('roles.user')
                         }
                       </p>
                       <div className="mt-2">
                         <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-100">
                           Compte {
-                            role === 'Directeur_technique' ? 'Administrateur' : 
-                            role === 'Chef_chantier' ? 'Superviseur' :
-                            role === 'RH' ? 'Gestionnaire' :
-                            'Opérateur'
+                            role === 'Directeur technique' ? 'Administrateur' :
+                              role === 'Chef_chantier' ? 'Superviseur' :
+                                role === 'Gestionnaire de stocks' || role === 'Gerant_production' ? 'Gestionnaire' :
+                                  'Utilisateur'
                           }
                         </span>
                       </div>
@@ -263,39 +264,39 @@ export const SettingsPage = () => {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-10">
                     <div className="space-y-1.5">
                       <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">{t('common.first_name')}</label>
-                      <Input 
-                        value={profileForm.firstName} 
-                        className="bg-slate-50/50 border-slate-200" 
+                      <Input
+                        value={profileForm.firstName}
+                        className="bg-slate-50/50 border-slate-200"
                         disabled={true}
                       />
                     </div>
                     <div className="space-y-1.5">
                       <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Nom</label>
-                      <Input 
-                        value={profileForm.lastName} 
-                        className="bg-slate-50/50 border-slate-200" 
+                      <Input
+                        value={profileForm.lastName}
+                        className="bg-slate-50/50 border-slate-200"
                         disabled={true}
                       />
                     </div>
                     <div className="space-y-1.5 md:col-span-2">
                       <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Matricule</label>
-                      <Input 
-                        value={profileForm.matricule} 
-                        className="bg-slate-50/50 border-slate-200" 
+                      <Input
+                        value={profileForm.matricule}
+                        className="bg-slate-50/50 border-slate-200"
                         disabled={true}
                       />
                     </div>
                     <div className="space-y-1.5">
                       <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Téléphone</label>
-                      <Input 
-                        value={profileForm.phone} 
-                        className="bg-slate-50/50 border-slate-200" 
+                      <Input
+                        value={profileForm.phone}
+                        className="bg-slate-50/50 border-slate-200"
                         disabled={true}
                       />
                     </div>
                     <div className="space-y-1.5">
                       <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">{t('settings.language_pref')}</label>
-                      <select 
+                      <select
                         value={profileForm.language}
                         className="w-full h-10 px-3 bg-slate-50/50 border border-slate-200 rounded-lg text-sm outline-none"
                         disabled={true}
@@ -349,7 +350,7 @@ export const SettingsPage = () => {
             )}
 
             {activeSection === 'appearance' && (
-              <motion.div 
+              <motion.div
                 key="appearance"
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -359,22 +360,22 @@ export const SettingsPage = () => {
                 <Card className="p-8 border-slate-100 shadow-sm">
                   <h3 className="text-lg font-bold text-slate-900 mb-6">{t('settings.display_mode')}</h3>
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <DisplayModeCard 
-                      icon={Sun} 
-                      label="Mode Clair" 
-                      active={displayMode === 'light'} 
+                    <DisplayModeCard
+                      icon={Sun}
+                      label="Mode Clair"
+                      active={displayMode === 'light'}
                       onClick={() => setDisplayMode('light')}
                     />
-                    <DisplayModeCard 
-                      icon={Moon} 
-                      label="Mode Sombre" 
-                      active={displayMode === 'dark'} 
+                    <DisplayModeCard
+                      icon={Moon}
+                      label="Mode Sombre"
+                      active={displayMode === 'dark'}
                       onClick={() => setDisplayMode('dark')}
                     />
-                    <DisplayModeCard 
-                      icon={Monitor} 
-                      label="Système" 
-                      active={displayMode === 'system'} 
+                    <DisplayModeCard
+                      icon={Monitor}
+                      label="Système"
+                      active={displayMode === 'system'}
                       onClick={() => setDisplayMode('system')}
                     />
                   </div>
@@ -399,7 +400,7 @@ export const SettingsPage = () => {
                         <p className="text-sm font-bold text-slate-900">Densité de l'interface</p>
                         <p className="text-xs text-slate-500">Espacement entre les éléments de l'interface</p>
                       </div>
-                      <select 
+                      <select
                         value={density}
                         onChange={(e) => setDensity(e.target.value as any)}
                         className="h-9 px-3 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold outline-none"
@@ -414,7 +415,7 @@ export const SettingsPage = () => {
                         <p className="text-sm font-bold text-slate-900">Animations</p>
                         <p className="text-xs text-slate-500">Activer les transitions fluides entre les pages</p>
                       </div>
-                      <button 
+                      <button
                         className={cn("w-12 h-6 rounded-full relative transition-colors", animationsEnabled ? "bg-emerald-500" : "bg-slate-300")}
                         onClick={() => setAnimationsEnabled(!animationsEnabled)}
                       >
@@ -461,7 +462,7 @@ export const SettingsPage = () => {
             )}
 
             {activeSection === 'notifications' && (
-              <motion.div 
+              <motion.div
                 key="notifications"
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -471,20 +472,20 @@ export const SettingsPage = () => {
                 <Card className="p-8 border-slate-100 shadow-sm">
                   <h3 className="text-lg font-bold text-slate-900 mb-6">Canaux de communication</h3>
                   <div className="space-y-4">
-                    <NotificationToggle 
-                      title="Notifications Email" 
-                      desc="Recevoir les rapports et alertes par courrier électronique" 
-                      enabled={true} 
+                    <NotificationToggle
+                      title="Notifications Email"
+                      desc="Recevoir les rapports et alertes par courrier électronique"
+                      enabled={true}
                     />
-                    <NotificationToggle 
-                      title="Notifications Push" 
-                      desc="Alertes en temps réel sur votre navigateur et mobile" 
-                      enabled={true} 
+                    <NotificationToggle
+                      title="Notifications Push"
+                      desc="Alertes en temps réel sur votre navigateur et mobile"
+                      enabled={true}
                     />
-                    <NotificationToggle 
-                      title="Alertes SMS" 
-                      desc="Notifications critiques pour les urgences chantiers" 
-                      enabled={false} 
+                    <NotificationToggle
+                      title="Alertes SMS"
+                      desc="Notifications critiques pour les urgences chantiers"
+                      enabled={false}
                     />
                   </div>
                 </Card>
@@ -495,31 +496,31 @@ export const SettingsPage = () => {
       </div>
 
       {/* Password Modal */}
-      <Modal 
-        isOpen={isPasswordModalOpen} 
-        onClose={() => setIsPasswordModalOpen(false)} 
-        title="Modifier le mot de passe"
+      <Modal
+        isOpen={isPasswordModalOpen}
+        onClose={() => setIsPasswordModalOpen(false)}
+        title={t('settings.modals.change_password')}
         size="md"
       >
         <form onSubmit={handlePasswordSubmit} className="space-y-6">
-          <Input label="Mot de passe actuel" type="password" required
+          <Input label={t('settings.modals.current_password')} type="password" required
             value={currentPassword} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCurrentPassword(e.target.value)} />
-          <Input label="Nouveau mot de passe" type="password" required
+          <Input label={t('settings.modals.new_password')} type="password" required
             value={newPassword} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNewPassword(e.target.value)} />
-          <Input label="Confirmer le nouveau mot de passe" type="password" required
+          <Input label={t('settings.modals.confirm_password')} type="password" required
             value={confirmPassword} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConfirmPassword(e.target.value)} />
           <div className="pt-6 border-t border-slate-100 flex justify-end gap-3">
             <Button variant="outline" type="button" onClick={() => setIsPasswordModalOpen(false)} className="font-bold" disabled={isUpdatingPassword}>
-              Annuler
+              {t('common.cancel')}
             </Button>
             <Button type="submit" className="px-8 font-bold shadow-lg shadow-blue-900/20" disabled={isUpdatingPassword}>
               {isUpdatingPassword ? (
                 <>
                   <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                  Traitement...
+                  {t('common.modals.processing')}
                 </>
               ) : (
-                "Mettre à jour"
+                t('settings.modals.update')
               )}
             </Button>
           </div>
@@ -550,19 +551,19 @@ export const SettingsPage = () => {
       <Modal
         isOpen={isLogoutModalOpen}
         onClose={() => setIsLogoutModalOpen(false)}
-        title="Déconnexion"
+        title={t('settings.modals.logout_title')}
         size="sm"
       >
         <div className="space-y-6">
-          <p className="text-sm text-slate-600">Êtes-vous sûr de vouloir vous déconnecter de votre session ?</p>
+          <p className="text-sm text-slate-600">{t('settings.modals.logout_confirm')}</p>
           <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
             <Button variant="outline" onClick={() => setIsLogoutModalOpen(false)} className="font-bold">{t('common.cancel')}</Button>
             <Button variant="danger" onClick={() => {
               setIsLogoutModalOpen(false);
               contextLogout();
-              notify("Déconnexion réussie. Redirection vers l'écran de connexion...", "info");
+              notify(t('settings.modals.logout_success'), "info");
               setTimeout(() => navigate('/login'), 1000);
-            }} className="font-bold">Se déconnecter</Button>
+            }} className="font-bold">{t('settings.modals.logout_btn')}</Button>
           </div>
         </div>
       </Modal>
@@ -574,7 +575,7 @@ export const SettingsPage = () => {
           setIs2FAModalOpen(false);
           setTwoFAStep(1);
         }}
-        title={is2FAEnabled ? "Gérer la Double Authentification" : "Activer la Double Authentification"}
+        title={is2FAEnabled ? t('settings.modals.manage_2fa') : t('settings.modals.enable_2fa')}
         size="md"
       >
         <div className="space-y-6">
@@ -583,7 +584,7 @@ export const SettingsPage = () => {
               <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto">
                 <Shield className="w-8 h-8" />
               </div>
-              <p className="text-sm text-slate-600">La double authentification est actuellement activée sur votre compte.</p>
+              <p className="text-sm text-slate-600">{t('settings.modals.2fa_enabled_desc')}</p>
               <Button variant="danger" className="w-full font-bold" onClick={() => {
                 setIs2FAEnabled(false);
                 setIs2FAModalOpen(false);
@@ -657,7 +658,7 @@ const NotificationToggle = ({ title, desc, enabled }: any) => (
 );
 
 const DisplayModeCard = ({ icon: Icon, label, active, onClick }: any) => (
-  <button 
+  <button
     onClick={onClick}
     className={cn(
       "p-6 rounded-3xl border-2 flex flex-col items-center gap-4 transition-all",
@@ -672,12 +673,12 @@ const DisplayModeCard = ({ icon: Icon, label, active, onClick }: any) => (
 );
 
 const SettingsNavButton = ({ icon: Icon, label, active, onClick }: any) => (
-  <button 
+  <button
     onClick={onClick}
     className={cn(
       "flex items-center gap-4 w-full px-6 py-4 rounded-3xl text-sm font-black transition-all",
-      active 
-        ? "bg-[var(--color-primary)] text-white shadow-xl shadow-[var(--color-primary)]/20 scale-105" 
+      active
+        ? "bg-[var(--color-primary)] text-white shadow-xl shadow-[var(--color-primary)]/20 scale-105"
         : "text-slate-500 hover:bg-slate-50 hover:text-slate-900"
     )}
   >

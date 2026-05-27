@@ -17,6 +17,10 @@ export const projectTaskService = {
     const res = await api.patch<{ data: any }>(`/api/projects/${projectId}/tasks/${taskId}/status`, payload);
     return res.data;
   },
+  reorder: async (projectId: number, orderedIds: number[]) => {
+    const res = await api.put<{ data: any[] }>(`/api/projects/${projectId}/tasks/reorder`, { order: orderedIds });
+    return res.data;
+  },
   remove: async (projectId: number, taskId: number) => {
     await api.delete(`/api/projects/${projectId}/tasks/${taskId}`);
   },

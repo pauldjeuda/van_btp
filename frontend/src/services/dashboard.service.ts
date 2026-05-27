@@ -1,4 +1,5 @@
 import { api } from './api';
+import type { PendingApprovalsResponse } from './approval.service';
 
 export interface DashboardKpisResponse {
   role: string;
@@ -26,6 +27,7 @@ export interface DashboardKpisResponse {
     quality: number;
   };
   recentActivity: any[];
+  pendingApprovals?: PendingApprovalsResponse;
 }
 
 export const dashboardService = {

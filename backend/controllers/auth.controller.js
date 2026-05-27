@@ -16,10 +16,10 @@ const { success, unauthorized, badRequest, error } = require('../utils/response'
 // ─── Map rôle → modèle Sequelize ─────────────────────────────────────────────
 
 const ROLE_MODELS = {
-  Directeur_technique: db.Directeur_technique,
+  'Directeur technique': db['Directeur technique'],
   Chef_chantier: db.ChefChantier,
-  Technicien_chantier: db.TechnicienChantier,
-  RH: db.RH,
+  Gerant_production: db.GerantProduction,
+  'Gestionnaire de stocks': db.GerantStock,
 };
 
 // ─── Helpers cookie ───────────────────────────────────────────────────────────

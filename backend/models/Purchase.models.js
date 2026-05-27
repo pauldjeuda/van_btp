@@ -4,6 +4,7 @@ const sequelize = require('../config/db');
 const Purchase = sequelize.define('Purchase', {
   id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
   ref: { type: DataTypes.STRING(50), unique: true },
+  orderRef: { type: DataTypes.STRING(50), allowNull: true },
   item: { type: DataTypes.STRING(200), allowNull: false },
   designation: { type: DataTypes.TEXT },
   quantity: { type: DataTypes.DECIMAL(10, 2), allowNull: false },

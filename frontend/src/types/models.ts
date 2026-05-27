@@ -36,6 +36,12 @@ export interface Project {
   dateCreation?: string;
   /** Nombre d'avenants */
   amendmentCount?: number;
+  /** Taux AIR (ex. « 2.2% (Régime Réel) ») */
+  airRate?: string | null;
+  /** Retenue de garantie (%) */
+  guaranteeRetention?: string | null;
+  /** Banque de cautionnement */
+  guaranteeBank?: string | null;
 }
 
 export interface Transaction {
@@ -72,6 +78,7 @@ export interface Incident {
   actionPlan: string;
   impact: string;
   image?: string;
+  images?: string[];
   history?: IncidentHistory[];
   projectId: number;
 }
@@ -95,6 +102,8 @@ export interface Employee {
   email?: string;
   avatar?: string;
   assignmentHistory: string[];
+  weeklySalary?: number;
+  isLocal?: boolean;
 }
 
 export interface Equipment {

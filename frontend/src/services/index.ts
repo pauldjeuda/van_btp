@@ -12,6 +12,7 @@ export * from './transaction.service';
 export * from './employee.service';
 export * from './equipment.service';
 export * from './stock.service';
+export * from './material.service';
 export * from './purchase.service';
 export * from './subcontract.service';
 export * from './incident.service';

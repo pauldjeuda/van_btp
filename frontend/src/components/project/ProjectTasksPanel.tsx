@@ -1,302 +1,510 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Plus, Trash2, ChevronDown, ChevronUp, User, Calendar, Flag, CheckCircle2, Clock, AlertTriangle, XCircle } from 'lucide-react';
+import { Plus, Trash2, GripVertical, ChevronUp, ChevronDown, CheckCircle2, Pencil, Check } from 'lucide-react';
 import { Button, Input, Modal, cn } from '../ui';
 import { projectTaskService } from '../../services/projectTask.service';
 import { useNotification } from '../../context/NotificationContext';
 
-const STATUS_CONFIG: Record<string, { label: string; color: string; icon: React.FC<any> }> = {
-  'À faire':   { label: 'À faire',   color: 'bg-slate-100 text-slate-600',    icon: Clock },
-  'En cours':  { label: 'En cours',  color: 'bg-blue-100 text-blue-700',      icon: ChevronDown },
-  'Terminé':   { label: 'Terminé',   color: 'bg-emerald-100 text-emerald-700', icon: CheckCircle2 },
-  'Bloqué':    { label: 'Bloqué',    color: 'bg-red-100 text-red-700',        icon: XCircle },
-};
-const PRIORITY_CONFIG: Record<string, string> = {
-  'Basse':    'bg-slate-100 text-slate-500',
-  'Normale':  'bg-blue-100 text-blue-600',
-  'Haute':    'bg-amber-100 text-amber-700',
-  'Critique': 'bg-red-100 text-red-700',
-};
+interface TaskRow {
+  id: number | string;
+  title: string;
+  description?: string | null;
+  status: string;
+  position?: number;
+  _deleted?: boolean;
+  _isNew?: boolean;
+  _edited?: boolean;
+  _moved?: boolean;
+}
 
 interface Props {
   projectId: number;
-  employees: any[];
   canEdit: boolean;
+  onProgressChange?: (progress: number) => void;
 }
 
-export const ProjectTasksPanel: React.FC<Props> = ({ projectId, employees, canEdit }) => {
+const sortByPosition = (list: TaskRow[]) =>
+  [...list].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+
+const calcProgress = (list: TaskRow[]) => {
+  const active = list.filter((t) => !t._deleted);
+  const total = active.length;
+  const done = active.filter((t) => t.status === 'Terminé').length;
+  return total > 0 ? Math.round((done / total) * 100) : 0;
+};
+
+const toDraft = (list: any[]): TaskRow[] =>
+  sortByPosition(
+    list.map((t) => ({
+      id: t.id,
+      title: t.title,
+      description: t.description,
+      status: t.status,
+      position: t.position ?? 0,
+    })),
+  );
+
+const ordersEqual = (a: TaskRow[], b: TaskRow[]) =>
+  a.length === b.length && a.every((t, i) => String(t.id) === String(b[i]?.id));
+
+export const ProjectTasksPanel: React.FC<Props> = ({ projectId, canEdit, onProgressChange }) => {
   const { t } = useTranslation();
   const { notify } = useNotification();
-  const [tasks,       setTasks]       = useState<any[]>([]);
-  const [loading,     setLoading]     = useState(true);
-  const [view,        setView]        = useState<'liste' | 'kanban'>('liste');
+  const [tasks, setTasks] = useState<TaskRow[]>([]);
+  const [initialLoad, setInitialLoad] = useState(true);
+  const [editMode, setEditMode] = useState(false);
+  const [draftTasks, setDraftTasks] = useState<TaskRow[]>([]);
+  const [baselineOrder, setBaselineOrder] = useState<TaskRow[]>([]);
+  const [applying, setApplying] = useState(false);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editingTask, setEditingTask] = useState<any>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [form, setForm] = useState({
-    title: '', description: '', assignedTo: '', assignedRole: '',
-    status: 'À faire', priority: 'Normale', startDate: '', dueDate: '', progress: 0,
-  });
+  const [editingDraft, setEditingDraft] = useState<TaskRow | null>(null);
+  const [form, setForm] = useState({ title: '', description: '' });
+  const tasksRef = useRef<TaskRow[]>([]);
+  const onProgressChangeRef = useRef(onProgressChange);
+  const lastReportedProgressRef = useRef<number | null>(null);
 
-  const load = async () => {
-    setLoading(true);
-    try { setTasks(await projectTaskService.getAll(projectId)); }
-    catch { setTasks([]); }
-    finally { setLoading(false); }
-  };
+  useEffect(() => {
+    onProgressChangeRef.current = onProgressChange;
+  }, [onProgressChange]);
 
-  useEffect(() => { if (projectId) load(); }, [projectId]);
+  const applyTasks = useCallback((list: any[]) => {
+    const normalized = toDraft(list);
+    setTasks(normalized);
+    tasksRef.current = normalized;
+    const progress = calcProgress(normalized);
+    if (lastReportedProgressRef.current !== progress) {
+      lastReportedProgressRef.current = progress;
+      onProgressChangeRef.current?.(progress);
+    }
+  }, []);
 
-  const openCreate = () => {
-    setEditingTask(null);
-    setForm({ title: '', description: '', assignedTo: '', assignedRole: '', status: 'À faire', priority: 'Normale', startDate: '', dueDate: '', progress: 0 });
-    setIsModalOpen(true);
-  };
-  const openEdit = (t: any) => {
-    setEditingTask(t);
-    setForm({ title: t.title, description: t.description || '', assignedTo: t.assignedTo ? String(t.assignedTo) : '', assignedRole: t.assignedRole || '', status: t.status, priority: t.priority, startDate: t.startDate || '', dueDate: t.dueDate || '', progress: t.progress || 0 });
-    setIsModalOpen(true);
-  };
+  useEffect(() => {
+    if (!projectId) return;
+    let cancelled = false;
+    lastReportedProgressRef.current = null;
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!form.title.trim()) { notify('Le titre est obligatoire', 'error'); return; }
-    setIsSubmitting(true);
-    try {
-      const payload = { ...form, assignedTo: form.assignedTo ? Number(form.assignedTo) : null, progress: Number(form.progress) };
-      if (editingTask) {
-        await projectTaskService.update(projectId, editingTask.id, payload);
-        notify('Tâche mise à jour', 'success');
-      } else {
-        await projectTaskService.create(projectId, payload);
-        notify('Tâche créée', 'success');
+    (async () => {
+      setInitialLoad(true);
+      try {
+        const data = await projectTaskService.getAll(projectId);
+        if (!cancelled) applyTasks(data);
+      } catch {
+        if (!cancelled) applyTasks([]);
+      } finally {
+        if (!cancelled) setInitialLoad(false);
       }
-      setIsModalOpen(false);
-      load();
-    } catch (err: any) { notify(err?.message || 'Erreur', 'error'); }
-    finally { setIsSubmitting(false); }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, applyTasks]);
+
+  const displayTasks = editMode ? draftTasks.filter((t) => !t._deleted) : tasks;
+
+  const hasPendingChanges = editMode && (() => {
+    const active = draftTasks.filter((t) => !t._deleted);
+    if (draftTasks.some((t) => t._deleted || t._isNew || t._edited)) return true;
+    return !ordersEqual(active, baselineOrder);
+  })();
+
+  const enterEditMode = () => {
+    const draft = toDraft(tasks);
+    setDraftTasks(draft);
+    setBaselineOrder(draft);
+    setEditMode(true);
   };
 
-  const handleStatusChange = async (task: any, newStatus: string) => {
+  const exitEditMode = () => {
+    setEditMode(false);
+    setDraftTasks([]);
+    setBaselineOrder([]);
+    setDragIndex(null);
+  };
+
+  const handleEditToggle = async () => {
+    if (!editMode) {
+      enterEditMode();
+      return;
+    }
+    if (!hasPendingChanges) {
+      exitEditMode();
+      return;
+    }
+    await applyDraftChanges();
+  };
+
+  const handleToggle = async (task: TaskRow) => {
+    if (!canEdit || editMode) return;
+    const done = task.status === 'Terminé';
+    const nextStatus = done ? 'À faire' : 'Terminé';
+    const prev = tasksRef.current;
+    const optimistic = prev.map((t) =>
+      t.id === task.id ? { ...t, status: nextStatus } : t,
+    );
+    setTasks(optimistic);
+    tasksRef.current = optimistic;
+    onProgressChange?.(calcProgress(optimistic));
     try {
-      await projectTaskService.updateStatus(projectId, task.id, { status: newStatus });
-      load();
-    } catch { notify('Erreur mise à jour statut', 'error'); }
+      await projectTaskService.updateStatus(projectId, task.id as number, {
+        status: nextStatus,
+        progress: done ? 0 : 100,
+      });
+    } catch {
+      setTasks(prev);
+      tasksRef.current = prev;
+      onProgressChange?.(calcProgress(prev));
+      notify(t('projects.tasks.status_error'), 'error');
+    }
   };
 
-  const handleDelete = async (taskId: number) => {
-    try { await projectTaskService.remove(projectId, taskId); load(); }
-    catch { notify('Erreur suppression', 'error'); }
+  const markDelete = (taskId: number | string) => {
+    setDraftTasks((list) =>
+      list.map((t) => (t.id === taskId ? { ...t, _deleted: true } : t)),
+    );
   };
 
-  const byStatus = (s: string) => tasks.filter(t => t.status === s);
-  const today = new Date().toISOString().split('T')[0];
+  const moveDraft = (from: number, to: number) => {
+    const visible = draftTasks.filter((t) => !t._deleted);
+    if (to < 0 || to >= visible.length || from === to) return;
+    const reordered = [...visible];
+    const [moved] = reordered.splice(from, 1);
+    reordered.splice(to, 0, moved);
+    const deleted = draftTasks.filter((t) => t._deleted);
+    const withFlags = reordered.map((t, i) => ({
+      ...t,
+      position: i,
+      _moved: !ordersEqual(reordered, baselineOrder),
+    }));
+    setDraftTasks([...withFlags, ...deleted]);
+  };
 
-  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-6 w-6 border-2 border-[var(--color-primary)] border-t-transparent rounded-full" /></div>;
+  const handleDrop = (dropIndex: number) => {
+    if (dragIndex === null || dragIndex === dropIndex) {
+      setDragIndex(null);
+      return;
+    }
+    moveDraft(dragIndex, dropIndex);
+    setDragIndex(null);
+  };
+
+  const openCreateDraft = () => {
+    setEditingDraft(null);
+    setForm({ title: '', description: '' });
+    setIsModalOpen(true);
+  };
+
+  const openEditDraft = (task: TaskRow) => {
+    setEditingDraft(task);
+    setForm({ title: task.title, description: task.description || '' });
+    setIsModalOpen(true);
+  };
+
+  const handleDraftFormSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.title.trim()) {
+      notify(t('projects.tasks.title_required'), 'error');
+      return;
+    }
+    if (editingDraft) {
+      setDraftTasks((list) =>
+        list.map((t) =>
+          t.id === editingDraft.id
+            ? {
+                ...t,
+                title: form.title.trim(),
+                description: form.description.trim() || null,
+                _edited: !t._isNew,
+              }
+            : t,
+        ),
+      );
+    } else {
+      const tempId = `new-${Date.now()}`;
+      setDraftTasks((list) => [
+        ...list,
+        {
+          id: tempId,
+          title: form.title.trim(),
+          description: form.description.trim() || null,
+          status: 'À faire',
+          position: list.filter((t) => !t._deleted).length,
+          _isNew: true,
+        },
+      ]);
+    }
+    setIsModalOpen(false);
+  };
+
+  const applyDraftChanges = async () => {
+    setApplying(true);
+    try {
+      const deleted = draftTasks.filter((t) => t._deleted && typeof t.id === 'number');
+      for (const t of deleted) {
+        await projectTaskService.remove(projectId, t.id as number);
+      }
+
+      const idMap = new Map<string, number>();
+      const active = sortByPosition(draftTasks.filter((t) => !t._deleted));
+
+      for (const t of active) {
+        if (t._isNew) {
+          const created = await projectTaskService.create(projectId, {
+            title: t.title,
+            description: t.description || null,
+            status: t.status,
+            progress: t.status === 'Terminé' ? 100 : 0,
+            position: t.position ?? 0,
+          });
+          idMap.set(String(t.id), created.id);
+        } else if (t._edited) {
+          await projectTaskService.update(projectId, t.id as number, {
+            title: t.title,
+            description: t.description || null,
+          });
+        }
+      }
+
+      const orderedIds = active.map((t) =>
+        t._isNew ? idMap.get(String(t.id))! : (t.id as number),
+      );
+      await projectTaskService.reorder(projectId, orderedIds);
+
+      const fresh = await projectTaskService.getAll(projectId);
+      applyTasks(fresh);
+      exitEditMode();
+      notify(t('projects.tasks.changes_applied'), 'success');
+    } catch (err: any) {
+      notify(err?.message || t('projects.tasks.apply_error'), 'error');
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const completedCount = displayTasks.filter((task) => task.status === 'Terminé').length;
+
+  if (initialLoad) {
+    return (
+      <div className="flex justify-center py-12">
+        <div className="animate-spin h-6 w-6 border-2 border-[var(--color-primary)] border-t-transparent rounded-full" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
-      {/* Barre d'actions */}
-      <div className="flex items-center justify-between">
-        <div className="flex gap-1 p-1 bg-slate-100 rounded-xl">
-          {(['liste', 'kanban'] as const).map(v => (
-            <button key={v} onClick={() => setView(v)}
-              className={cn('px-4 py-1.5 rounded-lg text-xs font-bold capitalize transition-all',
-                view === v ? 'bg-white shadow text-[var(--color-primary)]' : 'text-slate-500 hover:text-slate-700')}>
-              {v === 'liste' ? 'Liste' : 'Kanban'}
-            </button>
-          ))}
-        </div>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-3 text-xs text-slate-500">
-          <span>{tasks.filter(t => t.status === 'Terminé').length}/{tasks.length} terminées</span>
-          {canEdit && (
-            <Button size="sm" onClick={openCreate} className="gap-1">
-              <Plus className="w-3.5 h-3.5" /> Ajouter
+          <span className="font-bold">
+            {t('projects.tasks.tasks_completed', { completed: completedCount, total: displayTasks.length })}
+          </span>
+          {editMode && hasPendingChanges && (
+            <span className="text-amber-600 font-bold">{t('projects.tasks.pending_changes')}</span>
+          )}
+          {applying && <span className="text-[var(--color-primary)]">{t('projects.tasks.applying')}</span>}
+        </div>
+        <div className="flex items-center gap-2">
+          {canEdit && editMode && (
+            <Button size="sm" variant="outline" onClick={openCreateDraft} className="gap-1">
+              <Plus className="w-3.5 h-3.5" /> {t('projects.tasks.add_task')}
             </Button>
+          )}
+          {canEdit && (
+            <button
+              type="button"
+              onClick={handleEditToggle}
+              disabled={applying}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all',
+                editMode
+                  ? hasPendingChanges
+                    ? 'bg-emerald-500 text-white hover:bg-emerald-600 shadow-md'
+                    : 'bg-slate-200 text-slate-600 hover:bg-slate-300'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200',
+              )}
+              aria-label={editMode ? t('projects.tasks.validate_changes') : t('projects.tasks.enter_edit_mode')}
+            >
+              {editMode ? (
+                <>
+                  <Check className="w-3.5 h-3.5" />
+                  {hasPendingChanges ? t('projects.tasks.validate') : t('common.done')}
+                </>
+              ) : (
+                <>
+                  <Pencil className="w-3.5 h-3.5" />
+                  {t('common.edit')}
+                </>
+              )}
+            </button>
           )}
         </div>
       </div>
 
-      {tasks.length === 0 && (
-        <div className="text-center py-12 bg-slate-50 rounded-2xl border border-slate-200">
-          <CheckCircle2 className="w-10 h-10 text-slate-200 mx-auto mb-3" />
-          <p className="text-sm font-bold text-slate-400">{t('common.no_data')}</p>
-          {canEdit && <Button size="sm" onClick={openCreate} className="mt-3 gap-1"><Plus className="w-3.5 h-3.5" />Créer la première tâche</Button>}
-        </div>
-      )}
-
-      {/* Vue Liste */}
-      {view === 'liste' && tasks.length > 0 && (
-        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
-          <table className="w-full">
-            <thead className="bg-slate-50">
-              <tr>
-                {['Tâche', 'Responsable', 'Priorité', 'Statut', 'Échéance', 'Avancement', ''].map(h => (
-                  <th key={h} className="px-4 py-3 text-left text-xs font-black text-slate-500 uppercase tracking-widest">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-50">
-              {tasks.map(task => {
-                const isOverdue = task.dueDate && task.dueDate < today && task.status !== 'Terminé';
-                const StatusIcon = STATUS_CONFIG[task.status]?.icon || Clock;
-                return (
-                  <tr key={task.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-4 py-3">
-                      <p className={cn("text-sm font-bold text-slate-900", task.status === 'Terminé' && 'line-through opacity-50')}>{task.title}</p>
-                      {task.description && <p className="text-xs text-slate-400 mt-0.5 truncate max-w-xs">{task.description}</p>}
-                    </td>
-                    <td className="px-4 py-3">
-                      {task.assignee ? (
-                        <div className="flex items-center gap-1.5">
-                          <div className="w-6 h-6 rounded-full bg-[var(--color-primary)] text-white text-xs font-black flex items-center justify-center">
-                            {task.assignee.name?.[0] || '?'}
-                          </div>
-                          <div>
-                            <p className="text-xs font-bold text-slate-700">{task.assignee.name}</p>
-                            {task.assignedRole && <p className="text-xs text-slate-400">{task.assignedRole}</p>}
-                          </div>
-                        </div>
-                      ) : <span className="text-xs text-slate-300">{t('resources.details.assignment')}</span>}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${PRIORITY_CONFIG[task.priority] || ''}`}>{task.priority}</span>
-                    </td>
-                    <td className="px-4 py-3">
-                      {canEdit ? (
-                        <select value={task.status} onChange={e => handleStatusChange(task, e.target.value)}
-                          className={`text-xs font-bold px-2 py-1 rounded-lg border-0 outline-none cursor-pointer ${STATUS_CONFIG[task.status]?.color || ''}`}>
-                          {Object.keys(STATUS_CONFIG).map(s => <option key={s}>{s}</option>)}
-                        </select>
-                      ) : (
-                        <span className={`text-xs font-bold px-2 py-1 rounded-lg ${STATUS_CONFIG[task.status]?.color || ''}`}>{task.status}</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3">
-                      {task.dueDate ? (
-                        <span className={`text-xs font-medium ${isOverdue ? 'text-red-600 font-black' : 'text-slate-600'}`}>
-                          {isOverdue && '⚠ '}{task.dueDate}
-                        </span>
-                      ) : <span className="text-xs text-slate-300">—</span>}
-                    </td>
-                    <td className="px-4 py-3 min-w-[100px]">
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1 h-1.5 bg-slate-100 rounded-full">
-                          <div className="h-1.5 bg-[var(--color-primary)] rounded-full" style={{ width: `${task.progress || 0}%` }} />
-                        </div>
-                        <span className="text-xs font-bold text-slate-500">{task.progress || 0}%</span>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      {canEdit && (
-                        <div className="flex gap-1">
-                          <button onClick={() => openEdit(task)} className="text-slate-300 hover:text-[var(--color-primary)] p-1 transition-colors text-xs font-bold rotate-45">✏</button>
-                          <button onClick={() => handleDelete(task.id)} className="text-slate-300 hover:text-red-500 p-1 transition-colors"><Trash2 className="w-3.5 h-3.5" /></button>
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* Vue Kanban */}
-      {view === 'kanban' && tasks.length > 0 && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {Object.entries(STATUS_CONFIG).map(([status, cfg]) => {
-            const col = byStatus(status);
+      {displayTasks.length > 0 ? (
+        <ul className="space-y-2">
+          {displayTasks.map((task, index) => {
+            const done = task.status === 'Terminé';
             return (
-              <div key={status} className="space-y-2">
-                <div className="flex items-center gap-2 mb-3">
-                  <span className={`text-xs font-black px-2 py-1 rounded-full ${cfg.color}`}>{cfg.label}</span>
-                  <span className="text-xs text-slate-400 font-bold">{col.length}</span>
+              <li
+                key={String(task.id)}
+                draggable={editMode && !applying}
+                onDragStart={() => setDragIndex(index)}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={() => handleDrop(index)}
+                onDragEnd={() => setDragIndex(null)}
+                className={cn(
+                  'flex items-center gap-3 p-3 rounded-xl border bg-white transition-all duration-200',
+                  done && !editMode && 'border-emerald-100 bg-emerald-50/40',
+                  !done && !editMode && 'border-slate-200',
+                  editMode && task._isNew && 'border-blue-300 bg-blue-50/50',
+                  editMode && task._edited && 'border-amber-300 bg-amber-50/40',
+                  editMode && task._moved && 'ring-1 ring-amber-200',
+                  dragIndex === index && 'opacity-60 scale-[0.99]',
+                )}
+              >
+                {editMode && (
+                  <span className="text-slate-300 cursor-grab active:cursor-grabbing shrink-0">
+                    <GripVertical className="w-4 h-4" />
+                  </span>
+                )}
+
+                {!editMode && (
+                  <button
+                    type="button"
+                    onClick={() => handleToggle(task)}
+                    disabled={!canEdit}
+                    className={cn(
+                      'w-5 h-5 rounded-md border-2 flex items-center justify-center shrink-0 transition-colors',
+                      done
+                        ? 'bg-emerald-500 border-emerald-500 text-white'
+                        : 'border-slate-300 hover:border-[var(--color-primary)]',
+                    )}
+                    aria-label={done ? t('projects.tasks.mark_undone') : t('projects.tasks.mark_done')}
+                  >
+                    {done && <CheckCircle2 className="w-3.5 h-3.5" />}
+                  </button>
+                )}
+
+                <div className="flex-1 min-w-0">
+                  <p className={cn('text-sm font-bold text-slate-900', done && !editMode && 'line-through text-slate-500')}>
+                    {task.title}
+                  </p>
+                  {task.description && (
+                    <p className="text-xs text-slate-400 mt-0.5 truncate">{task.description}</p>
+                  )}
                 </div>
-                {col.map(task => {
-                  const isOverdue = task.dueDate && task.dueDate < today && task.status !== 'Terminé';
-                  return (
-                    <div key={task.id} onClick={() => canEdit && openEdit(task)}
-                      className={cn("bg-white border border-slate-200 rounded-xl p-3 shadow-sm cursor-pointer hover:shadow-md transition-all hover:border-[var(--color-primary)]/30", isOverdue && "border-red-200")}>
-                      <p className="text-sm font-bold text-slate-900 mb-2">{task.title}</p>
-                      {task.assignee && (
-                        <div className="flex items-center gap-1.5 mb-2">
-                          <div className="w-5 h-5 rounded-full bg-[var(--color-primary)] text-white text-xs font-black flex items-center justify-center">{task.assignee.name?.[0]}</div>
-                          <span className="text-xs text-slate-500">{task.assignee.name}</span>
-                        </div>
-                      )}
-                      <div className="flex items-center justify-between">
-                        <span className={`text-xs font-bold px-1.5 py-0.5 rounded-full ${PRIORITY_CONFIG[task.priority] || ''}`}>{task.priority}</span>
-                        {task.dueDate && <span className={`text-xs font-medium ${isOverdue ? 'text-red-600' : 'text-slate-400'}`}>{task.dueDate}</span>}
-                      </div>
-                      {task.progress > 0 && (
-                        <div className="mt-2 h-1 bg-slate-100 rounded-full"><div className="h-1 bg-[var(--color-primary)] rounded-full" style={{ width: `${task.progress}%` }} /></div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+
+                {editMode && (
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => moveDraft(index, index - 1)}
+                      disabled={index === 0 || applying}
+                      className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 disabled:opacity-30"
+                      aria-label={t('projects.tasks.move_up')}
+                    >
+                      <ChevronUp className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => moveDraft(index, index + 1)}
+                      disabled={index === displayTasks.length - 1 || applying}
+                      className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 disabled:opacity-30"
+                      aria-label={t('projects.tasks.move_down')}
+                    >
+                      <ChevronDown className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openEditDraft(task)}
+                      className="p-1.5 rounded-lg text-slate-400 hover:bg-amber-50 hover:text-amber-700"
+                      aria-label={t('common.edit')}
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => markDelete(task.id)}
+                      className="p-1.5 rounded-lg text-slate-400 hover:bg-red-50 hover:text-red-600"
+                      aria-label={t('common.delete')}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+              </li>
             );
           })}
+        </ul>
+      ) : (
+        <div className="text-center py-12 bg-slate-50 rounded-2xl border border-slate-200">
+          <CheckCircle2 className="w-10 h-10 text-slate-200 mx-auto mb-3" />
+          <p className="text-sm font-bold text-slate-400">{t('projects.tasks.checklist_empty')}</p>
+          {canEdit && !editMode && (
+            <Button size="sm" onClick={enterEditMode} className="mt-3 gap-1">
+              <Pencil className="w-3.5 h-3.5" /> {t('projects.tasks.manage_tasks')}
+            </Button>
+          )}
         </div>
       )}
 
-      {/* Modal création/édition */}
-      <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)}
-        title={editingTask ? 'Modifier la tâche' : 'Nouvelle tâche'} size="lg">
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <Input label="Titre *" required value={form.title}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm(p => ({ ...p, title: e.target.value }))} />
+      {editMode && draftTasks.some((t) => t._deleted) && (
+        <ul className="space-y-2 pt-2 border-t border-dashed border-red-200">
+          {draftTasks
+            .filter((t) => t._deleted)
+            .map((task) => (
+              <li
+                key={`del-${task.id}`}
+                className="flex items-center gap-3 p-3 rounded-xl border border-red-300 bg-red-50"
+              >
+                <Trash2 className="w-4 h-4 text-red-500 shrink-0" />
+                <p className="text-sm font-bold text-red-700 line-through flex-1">{task.title}</p>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setDraftTasks((list) =>
+                      list.map((t) => (t.id === task.id ? { ...t, _deleted: false } : t)),
+                    )
+                  }
+                  className="text-xs font-bold text-red-600 hover:underline"
+                >
+                  {t('common.cancel')}
+                </button>
+              </li>
+            ))}
+        </ul>
+      )}
+
+      <Modal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        title={editingDraft ? t('projects.modals.edit_task') : t('projects.modals.new_task')}
+        size="md"
+      >
+        <form onSubmit={handleDraftFormSubmit} className="space-y-4">
+          <Input
+            label={t('projects.modals.task_title')}
+            required
+            value={form.title}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              setForm((p) => ({ ...p, title: e.target.value }))
+            }
+          />
           <div className="space-y-1.5">
-            <label className="text-sm font-bold text-slate-700">Description</label>
-            <textarea value={form.description} rows={2}
-              onChange={e => setForm(p => ({ ...p, description: e.target.value }))}
-              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm resize-none focus:ring-2 focus:ring-[var(--color-primary)] outline-none" />
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-1.5">
-              <label className="text-sm font-bold text-slate-700">Responsable</label>
-              <select value={form.assignedTo} onChange={e => setForm(p => ({ ...p, assignedTo: e.target.value }))}
-                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white font-medium">
-                <option value="">— Non assigné —</option>
-                {employees.map(emp => <option key={emp.id} value={emp.id}>{emp.name} ({emp.role})</option>)}
-              </select>
-            </div>
-            <Input label="Rôle / Fonction" value={form.assignedRole} placeholder="Ingénieur, Consultant..."
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm(p => ({ ...p, assignedRole: e.target.value }))} />
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-1.5">
-              <label className="text-sm font-bold text-slate-700">Priorité</label>
-              <select value={form.priority} onChange={e => setForm(p => ({ ...p, priority: e.target.value }))}
-                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white font-medium">
-                {['Basse','Normale','Haute','Critique'].map(v => <option key={v}>{v}</option>)}
-              </select>
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-sm font-bold text-slate-700">Statut</label>
-              <select value={form.status} onChange={e => setForm(p => ({ ...p, status: e.target.value }))}
-                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white font-medium">
-                {Object.keys(STATUS_CONFIG).map(s => <option key={s}>{s}</option>)}
-              </select>
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <Input label="Date début" type="date" value={form.startDate}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm(p => ({ ...p, startDate: e.target.value }))} />
-            <Input label="Date fin" type="date" value={form.dueDate}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm(p => ({ ...p, dueDate: e.target.value }))} />
-          </div>
-          <div className="space-y-1.5">
-            <label className="text-sm font-bold text-slate-700">Avancement : {form.progress}%</label>
-            <input type="range" min={0} max={100} value={form.progress}
-              onChange={e => setForm(p => ({ ...p, progress: Number(e.target.value) }))}
-              className="w-full accent-[var(--color-primary)]" />
+            <label className="text-sm font-bold text-slate-700">{t('projects.modals.task_description')}</label>
+            <textarea
+              value={form.description}
+              rows={3}
+              onChange={(e) => setForm((p) => ({ ...p, description: e.target.value }))}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm resize-none focus:ring-2 focus:ring-[var(--color-primary)] outline-none"
+            />
           </div>
           <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
-            <Button variant="outline" type="button" onClick={() => setIsModalOpen(false)}>{t('common.cancel')}</Button>
-            <Button type="submit" isLoading={isSubmitting}>{editingTask ? t('common.save') : t('common.add')}</Button>
+            <Button variant="outline" type="button" onClick={() => setIsModalOpen(false)}>
+              {t('common.cancel')}
+            </Button>
+            <Button type="submit">{editingDraft ? t('common.save') : t('common.add')}</Button>
           </div>
         </form>
       </Modal>

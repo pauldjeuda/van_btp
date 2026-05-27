@@ -1,6 +1,7 @@
 import React from 'react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { useTranslation } from 'react-i18next';
 import { X, Eye, EyeOff, AlertCircle, CheckCircle2, Info, AlertTriangle } from 'lucide-react';
 
 export function cn(...inputs: ClassValue[]) {
@@ -51,12 +52,13 @@ interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   hint?: string;
   leftIcon?: React.ReactNode;
   rightElement?: React.ReactNode;
+  hidePasswordToggle?: boolean;
 }
 export const Input = React.forwardRef<HTMLInputElement, InputProps>(
-  ({ className, label, error, hint, type, leftIcon, rightElement, id, ...props }, ref) => {
+  ({ className, label, error, hint, type, leftIcon, rightElement, id, hidePasswordToggle, ...props }, ref) => {
     const [showPwd, setShowPwd] = React.useState(false);
     const inputId = id || label?.toLowerCase().replace(/\s+/g, '-');
-    const isPwd = type === 'password';
+    const isPwd = type === 'password' && !hidePasswordToggle;
     return (
       <div className="w-full space-y-1.5">
         {label && (
@@ -142,7 +144,9 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
             error && 'border-red-400',
             className
           )} {...props}>
-          {options ? options.map(o => <option key={o.value} value={o.value}>{o.label}</option>) : children}
+          {options ? options.map((o, i) => (
+            <option key={o.value !== '' && o.value != null ? o.value : `opt-${i}`} value={o.value}>{o.label}</option>
+          )) : children}
         </select>
         {error && <p className="text-xs text-red-500 font-medium">{error}</p>}
       </div>
@@ -416,7 +420,9 @@ export const Section: React.FC<SectionProps> = ({ title, description, actions, c
 /* ─── Data Table ──────────────────────────────────────────────────────────── */
 interface Column<T> { key: string; label: string; render?: (row: T) => React.ReactNode; className?: string; headerClassName?: string; }
 interface DataTableProps<T> { columns: Column<T>[]; data: T[]; keyField?: string; loading?: boolean; emptyTitle?: string; emptyDescription?: string; className?: string; onRowClick?: (row: T) => void; }
-export function DataTable<T extends Record<string, any>>({ columns, data, keyField = 'id', loading, emptyTitle = 'Aucune donnée', emptyDescription, className, onRowClick }: DataTableProps<T>) {
+export function DataTable<T extends Record<string, any>>({ columns, data, keyField = 'id', loading, emptyTitle, emptyDescription, className, onRowClick }: DataTableProps<T>) {
+  const { t } = useTranslation();
+  const resolvedEmptyTitle = emptyTitle ?? t('common.no_data');
   return (
     <div className={cn('overflow-x-auto -mx-4 sm:mx-0', className)}>
       <div className="min-w-full inline-block align-middle">
@@ -444,13 +450,13 @@ export function DataTable<T extends Record<string, any>>({ columns, data, keyFie
             ) : data.length === 0 ? (
               <tr>
                 <td colSpan={columns.length} className="py-12 text-center text-slate-400 text-sm">
-                  <p className="font-semibold text-slate-500">{emptyTitle}</p>
+                  <p className="font-semibold text-slate-500">{resolvedEmptyTitle}</p>
                   {emptyDescription && <p className="mt-1 text-xs">{emptyDescription}</p>}
                 </td>
               </tr>
             ) : (
               data.map((row, i) => (
-                <tr key={row[keyField] ?? i}
+                <tr key={row[keyField] != null && row[keyField] !== '' ? row[keyField] : `row-${i}`}
                   onClick={() => onRowClick?.(row)}
                   className={cn('transition-colors hover:bg-slate-50', onRowClick && 'cursor-pointer')}>
                   {columns.map(col => (
@@ -470,7 +476,9 @@ export function DataTable<T extends Record<string, any>>({ columns, data, keyFie
 
 /* ─── KPI Card ────────────────────────────────────────────────────────────── */
 interface KpiCardProps { label: string; value: string | number; subtitle?: string; icon: React.FC<any>; color?: string; bg?: string; trend?: number; loading?: boolean; onClick?: () => void; }
-export const KpiCard: React.FC<KpiCardProps> = ({ label, value, subtitle, icon: Icon, color = 'text-blue-600', bg = 'bg-blue-50', trend, loading, onClick }) => (
+export const KpiCard: React.FC<KpiCardProps> = ({ label, value, subtitle, icon: Icon, color = 'text-blue-600', bg = 'bg-blue-50', trend, loading, onClick }) => {
+  const { t } = useTranslation();
+  return (
   <Card className={cn('p-4 sm:p-5', onClick && 'cursor-pointer hover:shadow-md transition-shadow')} onClick={onClick}>
     <div className="flex items-start justify-between gap-2 mb-3">
       <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider leading-tight">{label}</p>
@@ -486,10 +494,11 @@ export const KpiCard: React.FC<KpiCardProps> = ({ label, value, subtitle, icon: 
         {subtitle && <p className="text-xs text-slate-500 truncate">{subtitle}</p>}
         {trend !== undefined && (
           <p className={cn('text-xs font-semibold mt-1.5', trend >= 0 ? 'text-emerald-600' : 'text-red-500')}>
-            {trend >= 0 ? '↑' : '↓'} {Math.abs(trend)}% vs mois préc.
+            {trend >= 0 ? '↑' : '↓'} {t('common.kpi_vs_month', { value: Math.abs(trend) })}
           </p>
         )}
       </>
     )}
   </Card>
-);
+  );
+};

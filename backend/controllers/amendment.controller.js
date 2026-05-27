@@ -23,19 +23,19 @@ exports.create = asyncHandler(async (req, res) => {
     const amendment = await db.ProjectAmendment.create({
       projectId, type, justification,
       ancienneDate, nouvelleDate, ancienBudget, nouveauBudget,
+      statut: 'En attente',
       createdBy: req.user.id,
     });
 
-    // Mettre à jour le compteur d'avenants
     await project.increment('amendmentCount');
 
     await db.Log.create({
-      action: `Avenant créé : ${type} sur le projet ${project.name}`,
+      action: `Avenant soumis pour validation DG : ${type} — ${project.name}`,
       module: 'Projets', entityType: 'ProjectAmendment', entityId: amendment.id,
       userId: req.user.id, userRole: req.role, userMatricule: req.user.matricule,
     });
 
-    return created(res, amendment, 'Avenant créé avec succès');
+    return created(res, amendment, 'Avenant soumis au directeur pour validation');
 });
 
 exports.updateStatus = asyncHandler(async (req, res) => {

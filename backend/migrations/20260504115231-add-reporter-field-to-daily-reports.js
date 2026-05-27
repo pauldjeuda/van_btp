@@ -2,16 +2,20 @@
 
 /** @type {import('sequelize-cli').Migration} */
 module.exports = {
-  async up (queryInterface, Sequelize) {
-    // Ajouter le champ reporter à la table daily_reports
+  async up(queryInterface, Sequelize) {
+    const table = await queryInterface.describeTable('daily_reports');
+    if (table.reporter) return;
+
     await queryInterface.addColumn('daily_reports', 'reporter', {
       type: Sequelize.STRING,
-      allowNull: true
+      allowNull: true,
     });
   },
 
-  async down (queryInterface, Sequelize) {
-    // Supprimer le champ reporter de la table daily_reports
+  async down(queryInterface) {
+    const table = await queryInterface.describeTable('daily_reports');
+    if (!table.reporter) return;
+
     await queryInterface.removeColumn('daily_reports', 'reporter');
-  }
+  },
 };

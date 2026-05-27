@@ -324,7 +324,7 @@ const { notify } = useNotification();
               <select value={accountingFilters.projectId}
                 onChange={e => setAccountingFilters(p => ({...p, projectId: e.target.value}))}
                 className="w-full h-10 px-3 border border-slate-200 rounded-xl text-sm bg-white font-medium focus:ring-2 focus:ring-[var(--color-primary)] outline-none">
-                <option value="">Tous les chantiers</option>
+                <option key="filter-all-projects" value="">Tous les chantiers</option>
                 {(data?.kpis || []).map((k: any) => (
                   <option key={k.id} value={k.id}>{k.name}</option>
                 ))}

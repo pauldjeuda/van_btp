@@ -4,11 +4,17 @@
  *
  * Basculement via VITE_DATA_SOURCE dans frontend/.env :
  *   VITE_DATA_SOURCE=local   → Backend Express local
- *   VITE_DATA_SOURCE=van_rh  → Serveur VAN RH distant (192.168.1.103:4000)
+ *   VITE_DATA_SOURCE=van_rh  → Serveur VAN RH (URL : backend/.env VAN_RH_URL)
  */
 
 import { api, tokenStore } from './api';
 import { Role } from '../types/permissions';
+import {
+  fixIntegrationImageUrl,
+  getVanRhUrl,
+  isVanRhDataSource,
+  loadIntegrationConfig,
+} from '../lib/integrationConfig';
 
 export interface AuthUser {
   id: number;
@@ -39,27 +45,21 @@ export interface AuthResult {
 const USER_KEY = 'van_btp_user';
 const ROLE_KEY = 'van_btp_role';
 
-// ─── Source de données active ─────────────────────────────────────────────────
-const DATA_SOURCE = import.meta.env.VITE_DATA_SOURCE || 'local';
-const VAN_RH_URL = import.meta.env.VITE_VAN_RH_URL || 'http://10.99.173.66:4000';
-
-const isVanRH = DATA_SOURCE === 'van_rh';
-
-console.log(`🔌 [AUTH SERVICE] Source de données : ${isVanRH ? '🌐 VAN RH (' + VAN_RH_URL + ')' : '🏠 LOCAL'}`);
-
-// ─── Helpers partagés ─────────────────────────────────────────────────────────
-
-const fixImageUrl = (url?: string) => {
-  if (!url) return '';
-  if (url.startsWith('http') || url.startsWith('data:')) return url;
-
-  const baseUrl = isVanRH
-    ? (import.meta.env.VITE_VAN_RH_URL || 'http://10.99.173.66:4000')
-    : (import.meta.env.VITE_API_URL || 'http://localhost:3001');
-
-  const cleanBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
-  return `${cleanBaseUrl}${url.startsWith('/') ? '' : '/'}${url}`;
+const ROLE_ALIASES: Record<string, Role> = {
+  Gerant_stock: 'Gestionnaire de stocks',
 };
+
+const normalizeRole = (role: string | null | undefined): Role | null => {
+  if (!role) return null;
+  return (ROLE_ALIASES[role] ?? role) as Role;
+};
+
+// ─── Source de données active ─────────────────────────────────────────────────
+const isVanRH = isVanRhDataSource();
+
+console.log(
+  `🔌 [AUTH SERVICE] Source de données : ${isVanRH ? '🌐 VAN RH' : '🏠 LOCAL'}`,
+);
 
 const saveSession = (token: string, user: AuthUser, role: Role) => {
   tokenStore.set(token);
@@ -76,10 +76,10 @@ const loginLocal = async (credentials: LoginCredentials): Promise<AuthResult> =>
   if (!json.success) throw new Error(json.message || 'Échec connexion');
 
   const { token, user } = json;
-  const role = user?.role as Role;
+  const role = normalizeRole(user?.role)!;
   const adaptedUser: AuthUser = {
     ...user,
-    photoUrl: fixImageUrl(user.avatar || user.photoUrl)
+    photoUrl: fixIntegrationImageUrl(user.avatar || user.photoUrl)
   };
 
   saveSession(token, adaptedUser, role);
@@ -89,7 +89,13 @@ const loginLocal = async (credentials: LoginCredentials): Promise<AuthResult> =>
 // ─── Login VAN RH ─────────────────────────────────────────────────────────────
 
 const loginVanRH = async (credentials: LoginCredentials): Promise<AuthResult> => {
-  console.log(`🌐 [AUTH SERVICE] Connexion via VAN RH : ${VAN_RH_URL}/api/auth-app/login`);
+  await loadIntegrationConfig();
+  const vanRhUrl = getVanRhUrl();
+  if (!vanRhUrl) {
+    throw new Error('VAN_RH_URL non configuré sur le backend (backend/.env)');
+  }
+
+  console.log(`🌐 [AUTH SERVICE] Connexion via VAN RH : ${vanRhUrl}/api/auth-app/login`);
 
   // compagnie et service sont hardcodés — l'utilisateur n'a pas à les saisir
   const body = {
@@ -99,7 +105,7 @@ const loginVanRH = async (credentials: LoginCredentials): Promise<AuthResult> =>
     service: 'van BTP',
   };
 
-  const response = await fetch(`${VAN_RH_URL}/api/auth-app/login`, {
+  const response = await fetch(`${vanRhUrl}/api/auth-app/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -115,7 +121,7 @@ const loginVanRH = async (credentials: LoginCredentials): Promise<AuthResult> =>
   // Adapter la réponse VAN RH vers notre format standard
   const token = json.token || json.accessToken;
   const rawUser = json.user || json;
-  const role = (rawUser?.role || rawUser?.Role) as Role;
+  const role = normalizeRole(rawUser?.role || rawUser?.Role)!;
 
   const adaptedUser: AuthUser = {
     id: rawUser.id,
@@ -123,7 +129,9 @@ const loginVanRH = async (credentials: LoginCredentials): Promise<AuthResult> =>
     nom: rawUser.nom,
     prenom: rawUser.prenom,
     email: rawUser.email,
-    photoUrl: fixImageUrl(rawUser.photoUrl || rawUser.avatar || rawUser.Avatar || rawUser.PhotoUrl),
+    photoUrl: fixIntegrationImageUrl(
+      rawUser.photoUrl || rawUser.avatar || rawUser.Avatar || rawUser.PhotoUrl,
+    ),
     doitChangerMotDePasse: rawUser.doitChangerMotDePasse,
   };
 
@@ -157,6 +165,8 @@ export const authService = {
     } finally {
       tokenStore.clear();
       localStorage.removeItem('van_rh_token');
+      localStorage.removeItem(USER_KEY);
+      localStorage.removeItem(ROLE_KEY);
     }
   },
 
@@ -182,13 +192,13 @@ export const authService = {
     if (!raw) return null;
     const user = JSON.parse(raw) as AuthUser;
     if (user.photoUrl) {
-      user.photoUrl = fixImageUrl(user.photoUrl);
+      user.photoUrl = fixIntegrationImageUrl(user.photoUrl);
     }
     return user;
   },
 
   getCachedRole: (): Role | null =>
-    (localStorage.getItem(ROLE_KEY) as Role) || null,
+    normalizeRole(localStorage.getItem(ROLE_KEY)),
 
   getToken: (): string | null => tokenStore.get(),
 };

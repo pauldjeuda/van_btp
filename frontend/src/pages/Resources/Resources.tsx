@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, Button, Input, Modal, cn } from '../../components/ui';
 import {
@@ -29,15 +29,33 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 
 import { exportToCSV } from '../../lib/exportUtils';
+import { formatCFA, formatNumber, formatQuantity, formatQuantityWithUnit } from '../../lib/formatters';
 import { usePermissions } from '../../hooks/usePermissions';
 import { useUser } from '../../context/UserContext';
 import { useHistory } from '../../context/HistoryContext';
 import { useData } from '../../context/DataContext';
 import { attendanceService } from '../../services/attendance.service';
+import { equipmentRequestService, type EquipmentRequest } from '../../services/equipmentRequest.service';
+import { useEquipmentRequestsLive } from '../../hooks/useEquipmentRequestsLive';
 import { useNotification } from '../../context/NotificationContext';
 import { useResourcesState } from './useResourcesState';
-import { ITEM_UNITS } from './resources.types';
-import { StockCard } from './StockCard';
+import { materialService } from '../../services/material.service';
+import { StockManagementPanel } from './StockManagementPanel';
+import { AttendancePanel } from './AttendancePanel';
+import { EquipmentRequestsPanel } from './EquipmentRequestsPanel';
+import { PurchaseOrderLines, createEmptyPurchaseLine, type PurchaseLineDraft } from './PurchaseOrderLines';
+import { PurchaseHistoryAccordion } from './PurchaseHistoryAccordion';
+import {
+  getPayableAmount,
+  getPaidAmount,
+  hasPayableTasks,
+  getPaymentStatusLabel,
+  shouldShowPaymentStatus,
+  sumTaskCosts,
+  formatFcfa,
+} from './subcontractUtils';
+
+type TaskDraft = { title: string; cost: string };
 
 
 export const ResourcesPage = () => {
@@ -45,6 +63,11 @@ export const ResourcesPage = () => {
   const { can } = usePermissions();
   const today = new Date().toISOString().split('T')[0];
   const { role, profile } = useUser();
+  const canManagePurchases = can('manage_purchases');
+  const canManageEquipment = can('assign_equipment');
+  const canManagePersonnel = can('assign_personnel') || can('manage_rh_assignments');
+  const isChefSiteRole = role === 'Chef_chantier';
+  const isDirecteurTechnique = role === 'Directeur technique';
   const name = profile?.name;
   const { addLog } = useHistory();
   const {
@@ -56,26 +79,40 @@ export const ResourcesPage = () => {
     deleteEmployee,
     unassignEmployee,
     equipmentList,
-    addEquipment,
     updateEquipment,
     deleteEquipment,
     stockMovements,
     addStockMovement,
     purchases,
-    addPurchase,
+    addPurchaseBatch,
     updatePurchase,
     subcontracts,
     addSubcontract,
     updateSubcontract,
     deleteSubcontract,
     toggleSubcontractTask: contextToggleSubcontractTask,
-    addTransaction
+    paySubcontractCompletedTasks,
+    addTransaction,
   } = useData();
+
+  const currentEmployee = employees.find(e =>
+    String(e.matricule || '').trim().toUpperCase() === String(profile?.matricule || '').trim().toUpperCase()
+  );
+  const currentProjectId = currentEmployee?.projectId || 0;
+
+  const chefProjects = useMemo(() => {
+    if (role === 'Chef_chantier') return projects;
+    return projects.filter(p => Number(p.chefId) === Number(profile?.id));
+  }, [projects, profile, role]);
+
+  const chefProjectIds = useMemo(() => {
+    return chefProjects.map(p => Number(p.id));
+  }, [chefProjects]);
 
   const [isConfirmDeleteModalOpen, setIsConfirmDeleteModalOpen] = useState(false);
   const [employeeToDelete, setEmployeeToDelete] = useState<any>(null);
   const [activeTab, setActiveTab] = useState<'purchases' | 'stock' | 'equipment' | 'hr' | 'subcontracting' | 'pointage'>(
-    (role === 'Directeur_technique' || role === 'Chef_chantier') ? 'purchases' : (role === 'RH' ? 'hr' : 'stock')
+    role === 'Gestionnaire de stocks' ? 'stock' : 'purchases',
   );
   // Pointage
   const [attendanceDate, setAttendanceDate] = useState(new Date().toISOString().split('T')[0]);
@@ -94,9 +131,10 @@ export const ResourcesPage = () => {
   const [newServiceProvider, setNewServiceProvider] = useState({
     name: '',
     projectId: projects[0]?.id || 0,
-    tasks: [] as string[],
-    totalCost: '',
+    tasks: [] as TaskDraft[],
   });
+  const [newProviderTaskTitle, setNewProviderTaskTitle] = useState('');
+  const [newProviderTaskCost, setNewProviderTaskCost] = useState('');
   const [isEquipmentModalOpen, setIsEquipmentModalOpen] = useState(false);
   const [selectedResource, setSelectedResource] = useState<any>(null);
   const [hrSearchQuery, setHrSearchQuery] = useState('');
@@ -128,20 +166,96 @@ export const ResourcesPage = () => {
   const [isSubmittingPurchase, setIsSubmittingPurchase] = useState(false);
   const [isSubmittingStockMovement, setIsSubmittingStockMovement] = useState(false);
   const [isSubmittingEquipment, setIsSubmittingEquipment] = useState(false);
+  const [equipmentRequestForm, setEquipmentRequestForm] = useState({
+    needDescription: '',
+    desiredDate: '',
+    projectId: 0,
+  });
   const [isDeletingEmployee, setIsDeletingEmployee] = useState(false);
   const [isUnassigningEmployee, setIsUnassigningEmployee] = useState(false);
   const [isAssigningEmployee, setIsAssigningEmployee] = useState(false);
   const [isSubmittingServiceProvider, setIsSubmittingServiceProvider] = useState(false);
   const [isPayingProvider, setIsPayingProvider] = useState(false);
 
-  const [stockView, setStockView] = useState<'warehouse' | 'projects'>('projects');
+  const [stockView, setStockView] = useState<'warehouse' | 'projects'>(
+    role === 'Gestionnaire de stocks' ? 'warehouse' : 'projects',
+  );
+
+  useEffect(() => {
+    if (role === 'Chef_chantier' && stockView === 'warehouse') {
+      setStockView('projects');
+    }
+  }, [role, stockView]);
 
   const getProjectNameById = (projectId?: number) => {
     if (projectId === 0) return t('resources.stock.central_warehouse');
-    return projects.find(p => p.id === projectId)?.name || t('resources.project.unknown');
+    return projects.find((p) => p.id === projectId)?.name || t('resources.project.unknown');
+  };
+
+  const getEmployeeProjectLabel = (projectId?: number) => {
+    if (!projectId || projectId === 0) return t('resources.hr.no_assignment');
+    return projects.find((p) => p.id === projectId)?.name || t('resources.hr.no_assignment');
   };
   const getProjectIdByName = (name?: string) => projects.find(p => p.name === name)?.id || 0;
   const { notify } = useNotification();
+
+  const stockProjectList = useMemo(() => {
+    if (role === 'Chef_chantier') return chefProjects;
+    return projects;
+  }, [role, chefProjects, projects]);
+
+  const resolveStockProjectId = () => {
+    if (role === 'Chef_chantier') {
+      return selectedStockProject ?? stockProjectList[0]?.id ?? null;
+    }
+    if (stockView === 'warehouse') return 0;
+    return selectedStockProject ?? stockProjectList[0]?.id ?? 0;
+  };
+
+  const openStockMovement = async (
+    material?: { id: number; name: string; unit: string },
+    preset: 'entry' | 'exit' | 'transfer' = 'entry',
+  ) => {
+    const defaultPid = resolveStockProjectId();
+    if (defaultPid == null) {
+      notify(t('resources.stock.no_project_available'), 'warning');
+      return;
+    }
+    const defaultName =
+      defaultPid === 0 ? t('resources.stock.central_warehouse') : getProjectNameById(defaultPid);
+
+    try {
+      const inv = await materialService.getInventory(defaultPid);
+      setMovementMaterials(
+        inv.items
+          .filter((m) => m.id != null)
+          .map((m) => ({ id: m.id, name: m.name, unit: m.unit })),
+      );
+      if (!material && inv.items.length === 0) {
+        notify(t('resources.stock.add_material_first'), 'warning');
+      }
+    } catch {
+      setMovementMaterials([]);
+    }
+
+    setStockMovementType(preset);
+    setStockMovementStep(1);
+    setStockMovementError(null);
+    setNewStockMovement({
+      item: material?.name || '',
+      materialId: material?.id,
+      qty: '',
+      unit: material?.unit || '',
+      fromProjectId: defaultPid,
+      toProjectId: defaultPid,
+      chantier: defaultName,
+      fromChantier: defaultName,
+      toChantier: defaultName,
+      receiver: '',
+      docRef: '',
+    });
+    setIsStockMovementModalOpen(true);
+  };
 
   const handleAssign = async (emp: any, projectValue: string | number) => {
     const projectId = typeof projectValue === 'number' ? projectValue : getProjectIdByName(projectValue);
@@ -219,14 +333,7 @@ export const ResourcesPage = () => {
     setIsLoadingAttendance(true);
     try {
       let history;
-      if (role === 'Technicien_chantier') {
-        const me = employees.find(e => e.matricule === profile?.matricule) ||
-          employees.find(e => e.name === profile?.name);
-        if (me?.id) {
-          const res = await attendanceService.getHistory(me.id) as any;
-          history = Array.isArray(res) ? res : res.data;
-        }
-      } else if (attendanceProjectId) {
+      if (attendanceProjectId) {
         const res = await attendanceService.getAll({ projectId: attendanceProjectId }) as any;
         history = Array.isArray(res) ? res : res.data;
       }
@@ -266,71 +373,39 @@ export const ResourcesPage = () => {
     }
   }, [activeTab, attendanceProjectId]);
 
-  const stockItems = React.useMemo(() => [
-    { name: 'Ciment CPJ 35', unit: 'Sacs', icon: Package, color: 'blue' },
-    { name: 'Sable de Sanaga', unit: 'm3', icon: Package, color: 'emerald' },
-    { name: 'Gazole Chantier', unit: 'L', icon: Package, color: 'amber' },
-    { name: 'Fer à béton 12mm', unit: 'Barres', icon: Package, color: 'red' },
-  ], []);
+  const [movementMaterials, setMovementMaterials] = useState<{ id: number; name: string; unit: string }[]>([]);
+  const [stockInventoryKey, setStockInventoryKey] = useState(0);
 
-  const calculatedStock = React.useMemo(() => {
-    // Liste dynamique des articles basés sur les mouvements + liste de base
-    const dynamicItems = Array.from(new Set([
-      ...stockItems.map(i => i.name),
-      ...stockMovements.map(m => m.item)
-    ]));
-
-    return dynamicItems.map(itemName => {
-      const baseItem = stockItems.find(i => i.name === itemName);
-      const itemUnit = baseItem?.unit || ITEM_UNITS[itemName] || 'Unités';
-
-      const movements = stockMovements.filter(m => {
-        const matchItem = m.item === itemName;
-        if (stockView === 'warehouse') {
-          // Comparaison souple pour l'ID de projet
-          return matchItem && (m.projectId == 0 || m.projectId === null);
-        } else {
-          const matchProject = selectedStockProject === null
-            ? (m.projectId != 0 && m.projectId !== null)
-            : (Number(m.projectId) === Number(selectedStockProject));
-          return matchItem && matchProject;
-        }
-      });
-
-      const total = movements.reduce((acc, m) => {
-        const qty = parseFloat(m.quantity || m.qty || 0);
-        if (m.type.startsWith('Entrée')) return acc + qty;
-        if (m.type.startsWith('Sortie') || m.type === 'Transfert') return acc - qty;
-        return acc;
-      }, 0);
-
-      return {
-        title: itemName,
-        qty: `${total.toLocaleString()} ${itemUnit}`,
-        totalQty: total, // Stocker le nombre brut pour les calculs de KPI
-        status: total === 0 ? t('resources.status.empty') : total > 100 ? t('resources.status.normal') : total > 20 ? t('resources.status.low') : t('resources.status.critical'),
-        icon: baseItem?.icon || Package,
-        color: baseItem?.color || 'blue'
-      };
-    });
-  }, [stockMovements, selectedStockProject, projects, stockItems, stockView]);
-
-  const [newPurchase, setNewPurchase] = useState({
-    item: 'Ciment CPJ 35',
-    qty: '',
-    unit: 'Tonnes',
-    unitPrice: '',
+  const defaultPurchaseHeader = () => ({
     provider: '',
     priority: 'Normale',
     projectId: projects[0]?.id || 0,
     chantier: projects[0]?.name || '',
-    deliveryDate: new Date().toISOString().split('T')[0]
+    deliveryDate: new Date().toISOString().split('T')[0],
+    notes: '',
   });
 
+  const [purchaseHeader, setPurchaseHeader] = useState(defaultPurchaseHeader);
+  const [purchaseLines, setPurchaseLines] = useState<PurchaseLineDraft[]>([createEmptyPurchaseLine()]);
+
+  const purchaseGroups = useMemo(() => {
+    const sorted = [...purchases].sort(
+      (a, b) => new Date(b.deliveryDate || b.date || 0).getTime() - new Date(a.deliveryDate || a.date || 0).getTime(),
+    );
+    const map = new Map<string, typeof purchases>();
+    for (const p of sorted) {
+      const key = p.orderRef || `single-${p.id}`;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(p);
+    }
+    return [...map.values()];
+  }, [purchases]);
+
   const [newStockMovement, setNewStockMovement] = useState({
-    item: 'Ciment CPJ 35',
+    item: '',
+    materialId: undefined as number | undefined,
     qty: '',
-    unit: 'Tonnes',
+    unit: '',
     fromProjectId: 0,
     toProjectId: 0,
     chantier: '',
@@ -343,33 +418,55 @@ export const ResourcesPage = () => {
 
 
 
+  const resetPurchaseForm = () => {
+    setPurchaseHeader(defaultPurchaseHeader());
+    setPurchaseLines([createEmptyPurchaseLine()]);
+  };
+
   const handlePurchaseSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (purchaseStep < 2) {
       setIsSubmittingPurchase(true);
       try {
-        // Validation côté client avant envoi
-        if (!newPurchase.projectId) {
+        if (!purchaseHeader.projectId) {
           notify(t('resources.errors.select_project'), 'error', '/resources');
           setIsSubmittingPurchase(false);
           return;
         }
-        if (!newPurchase.qty || Number(newPurchase.qty) <= 0) {
-          notify(t('resources.errors.quantity_positive'), 'error', '/resources');
+
+        const validLines = purchaseLines.filter((l) => l.item && Number(l.qty) > 0);
+        if (validLines.length === 0) {
+          notify(t('resources.errors.purchase_lines_required'), 'error', '/resources');
           setIsSubmittingPurchase(false);
           return;
         }
 
-        // Attendre la création effective en base avant d'afficher la notification
-        await addPurchase(newPurchase);
+        await addPurchaseBatch({
+          projectId: purchaseHeader.projectId,
+          provider: purchaseHeader.provider,
+          deliveryDate: purchaseHeader.deliveryDate,
+          priority: purchaseHeader.priority,
+          designation: purchaseHeader.notes,
+          lines: validLines.map((l) => ({
+            item: l.item,
+            quantity: Number(l.qty),
+            unit: l.unit,
+            unitPrice: Number(l.unitPrice || 0),
+          })),
+        });
 
+        const itemsSummary = validLines.map((l) => l.item).join(', ');
         addLog({
           module: 'Ressources',
-          action: `Nouvelle DA: ${newPurchase.item} (${newPurchase.qty} ${newPurchase.unit}) pour ${getProjectNameById(newPurchase.projectId)}`,
+          action: `Nouvelle DA (${validLines.length} ligne(s)): ${itemsSummary} pour ${getProjectNameById(purchaseHeader.projectId)}`,
           user: name || 'Utilisateur',
-          type: 'info'
+          type: 'info',
         });
-        notify(t('resources.notifications.purchase_created', { qty: newPurchase.qty, unit: newPurchase.unit, item: newPurchase.item }), 'success', '/resources');
+        notify(
+          t('resources.notifications.purchase_batch_created', { count: validLines.length }),
+          'success',
+          '/resources',
+        );
         setPurchaseStep(purchaseStep + 1);
       } catch (err: any) {
         notify(err?.message || t('resources.errors.purchase_creation_error'), 'error', '/resources');
@@ -379,28 +476,9 @@ export const ResourcesPage = () => {
     } else {
       setIsPurchaseModalOpen(false);
       setPurchaseStep(1);
-      setNewPurchase({
-        item: 'Ciment CPJ 35',
-        qty: '',
-        unit: 'Tonnes',
-        unitPrice: '',
-        provider: '',
-        priority: 'Normale',
-        projectId: projects[0]?.id || 0,
-        chantier: projects[0]?.name || '',
-        deliveryDate: new Date().toISOString().split('T')[0]
-      });
+      resetPurchaseForm();
     }
   };
-
-  const availableEquipment = [
-    { name: 'Bulldozer CAT D6', type: 'Bulldozer', ref_prefix: 'BULL' },
-    { name: 'Compacteur BOMAG BW213', type: 'Compacteur', ref_prefix: 'COMP' },
-    { name: 'Chargeuse VOLVO L120', type: 'Chargeuse', ref_prefix: 'CHAR' },
-    { name: 'Pelle Hydraulique CAT 336', type: 'Pelle Hydraulique', ref_prefix: 'ENG' },
-    { name: 'Camion Citerne Gazole', type: 'Camion', ref_prefix: 'CIT' },
-    { name: 'Groupe Électrogène 500kVA', type: 'Énergie', ref_prefix: 'GRP' },
-  ];
 
   // Compteur pour générer un matricule unique
   const generateMatricule = () => `VMAT${String(Date.now()).slice(-6)}`;
@@ -417,6 +495,7 @@ export const ResourcesPage = () => {
 
   const [editingContract, setEditingContract] = useState<any>(null);
   const [newSubcontractTask, setNewSubcontractTask] = useState('');
+  const [newSubcontractTaskCost, setNewSubcontractTaskCost] = useState('');
 
   const [newEmployee, setNewEmployee] = useState({
     name: '',
@@ -425,14 +504,8 @@ export const ResourcesPage = () => {
     contract: t('resources.contracts.cdi') as 'CDI' | 'CDD' | 'Intérim' | 'Prestataire' | 'Stage',
     niu: '',
     phone: '',
-  });
-
-  const [newEquipment, setNewEquipment] = useState({
-    name: '',
-    ref: '',
-    serial: '',
-    type: 'Pelle Hydraulique',
-    location: 'Section Edéa'
+    projectId: 0,
+    weeklySalary: '',
   });
 
   const [newSubcontract, setNewSubcontract] = useState({
@@ -443,13 +516,13 @@ export const ResourcesPage = () => {
     amount: '',
     startDate: '',
     endDate: '',
-    tasks: [] as string[],
-    // Gestion par lots
-    lots: [] as { lotNumber: number; lotName: string; tasks: string[] }[]
+    tasks: [] as TaskDraft[],
+    lots: [] as { lotNumber: number; lotName: string; tasks: TaskDraft[] }[],
   });
   const [useLots, setUseLots] = useState(false);
   const [newLotName, setNewLotName] = useState('');
   const [newLotTask, setNewLotTask] = useState<Record<number, string>>({});
+  const [newLotTaskCost, setNewLotTaskCost] = useState<Record<number, string>>({});
 
   const addLot = () => {
     const lotNumber = newSubcontract.lots.length + 1;
@@ -468,14 +541,42 @@ export const ResourcesPage = () => {
   };
 
   const addTaskToLot = (lotIndex: number) => {
-    const task = newLotTask[lotIndex]?.trim();
-    if (!task) return;
-    setNewSubcontract(prev => {
+    const title = newLotTask[lotIndex]?.trim();
+    if (!title) return;
+    const cost = newLotTaskCost[lotIndex] || '0';
+    setNewSubcontract((prev) => {
       const lots = [...prev.lots];
-      lots[lotIndex] = { ...lots[lotIndex], tasks: [...lots[lotIndex].tasks, task] };
+      lots[lotIndex] = {
+        ...lots[lotIndex],
+        tasks: [...lots[lotIndex].tasks, { title, cost }],
+      };
       return { ...prev, lots };
     });
-    setNewLotTask(prev => ({ ...prev, [lotIndex]: '' }));
+    setNewLotTask((prev) => ({ ...prev, [lotIndex]: '' }));
+    setNewLotTaskCost((prev) => ({ ...prev, [lotIndex]: '' }));
+  };
+
+  const buildTasksPayload = () => {
+    const raw = useLots
+      ? newSubcontract.lots.flatMap((lot) =>
+          lot.tasks
+            .filter((t) => t.title.trim() !== '')
+            .map((t) => ({
+              title: t.title.trim(),
+              cost: Number(t.cost || 0),
+              lotNumber: lot.lotNumber,
+              lotName: lot.lotName,
+            })),
+        )
+      : newSubcontract.tasks
+          .filter((t) => t.title.trim() !== '')
+          .map((t) => ({
+            title: t.title.trim(),
+            cost: Number(t.cost || 0),
+            lotNumber: 1,
+            lotName: 'Lot 1',
+          }));
+    return raw;
   };
 
   const removeTaskFromLot = (lotIndex: number, taskIndex: number) => {
@@ -486,15 +587,56 @@ export const ResourcesPage = () => {
     });
   };
 
-  const activeEmployees = employees.filter(emp =>
-    (emp.projectId && emp.projectId !== 0) && !emp.isOnLeave &&
-    (emp.name.toLowerCase().includes(hrSearchQuery.toLowerCase()) ||
-      emp.role.toLowerCase().includes(hrSearchQuery.toLowerCase()) ||
-      (emp.niu && emp.niu.toLowerCase().includes(hrSearchQuery.toLowerCase()))) &&
-    (selectedProjectFilter === null || emp.projectId === selectedProjectFilter)
+  const isHrExcludedFromRegistry = useCallback((emp: (typeof employees)[number]) => {
+    if ((emp as any)._virtual || (emp as any).isCurrentUser) return true;
+    const r = (emp.role || '').toLowerCase();
+    return r.includes('directeur');
+  }, []);
+
+  const hrRegistryEmployees = useMemo(
+    () => employees.filter(emp => !isHrExcludedFromRegistry(emp)),
+    [employees, isHrExcludedFromRegistry]
   );
 
-  const unassignedEmployees = employees.filter(emp => (!emp.projectId || emp.projectId === 0) && !emp.isOnLeave);
+  const displayedHrEmployees = useMemo(() => {
+    const q = hrSearchQuery.toLowerCase();
+    return hrRegistryEmployees.filter(emp => {
+      const matchesSearch =
+        emp.name.toLowerCase().includes(q) ||
+        emp.role.toLowerCase().includes(q) ||
+        (emp.niu && emp.niu.toLowerCase().includes(q));
+      const matchesProject = selectedProjectFilter === null || emp.projectId === selectedProjectFilter;
+
+      if (role === 'Chef_chantier') {
+        return (
+          matchesSearch &&
+          matchesProject &&
+          emp.isLocal === true &&
+          chefProjectIds.includes(Number(emp.projectId)) &&
+          !emp.isOnLeave
+        );
+      }
+
+      return matchesSearch && matchesProject && !emp.isOnLeave;
+    });
+  }, [hrRegistryEmployees, hrSearchQuery, selectedProjectFilter, role, chefProjectIds]);
+
+  const unassignedEmployees = useMemo(
+    () => hrRegistryEmployees.filter(emp => (!emp.projectId || emp.projectId === 0) && !emp.isOnLeave),
+    [hrRegistryEmployees]
+  );
+
+  const isOnActiveProject = (projectId?: number) =>
+    !!projectId && projectId !== 0 && projects.some((p) => p.id === projectId);
+
+  const hrStats = useMemo(() => {
+    const active = hrRegistryEmployees.filter(e => !e.isOnLeave);
+    return {
+      total: active.length,
+      onSites: active.filter((e) => isOnActiveProject(e.projectId)).length,
+      offDuty: hrRegistryEmployees.filter(e => e.isOnLeave).length,
+    };
+  }, [hrRegistryEmployees, projects]);
 
 
 
@@ -509,16 +651,31 @@ export const ResourcesPage = () => {
       notify('Le poste est obligatoire', 'error');
       return;
     }
+    if (role === 'Chef_chantier' && (!newEmployee.projectId || newEmployee.projectId === 0)) {
+      notify('Veuillez sélectionner un chantier pour cet employé.', 'error');
+      return;
+    }
+    if (role === 'Chef_chantier') {
+      const salary = parseFloat(newEmployee.weeklySalary);
+      if (!Number.isFinite(salary) || salary <= 0) {
+        notify(t('resources.hr.weekly_salary_required'), 'error');
+        return;
+      }
+    }
     setIsAddingEmployee(true);
     try {
+      const selectedProjId = role === 'Chef_chantier' ? newEmployee.projectId : undefined;
+
       await addEmployee({
         name: newEmployee.name.trim(),
         role: newEmployee.role,
         matricule: newEmployee.matricule.trim() || generateMatricule(),
-        contract: newEmployee.contract,
+        contract: role === 'Chef_chantier' ? 'CDD' : newEmployee.contract,
         niu: newEmployee.niu.trim(),
         phone: newEmployee.phone.trim(),
-        // Pas de projectId — l'affectation est une étape séparée
+        projectId: selectedProjId,
+        isLocal: role === 'Chef_chantier',
+        weeklySalary: role === 'Chef_chantier' ? parseFloat(newEmployee.weeklySalary) : undefined,
       });
       addLog({
         module: 'Ressources',
@@ -527,7 +684,7 @@ export const ResourcesPage = () => {
         type: 'success'
       });
       notify(t('resources.notifications.employee_added', { name: newEmployee.name }), 'success', '/resources');
-      setNewEmployee({ name: '', role: t('resources.roles.technician'), matricule: '', contract: t('resources.contracts.cdi'), niu: '', phone: '' });
+      setNewEmployee({ name: '', role: t('resources.roles.technician'), matricule: '', contract: t('resources.contracts.cdi'), niu: '', phone: '', projectId: 0, weeklySalary: '' });
       setIsEmployeeModalOpen(false);
     } catch (err: any) {
       notify(err?.message || t('resources.errors.employee_add_error'), 'error', '/resources');
@@ -536,32 +693,92 @@ export const ResourcesPage = () => {
     }
   };
 
-  const handleAddEquipment = async (item: any, projectId: number) => {
-    const projectName = getProjectNameById(projectId);
+  const equipmentRequestsLive = useEquipmentRequestsLive({
+    enabled: activeTab === 'equipment',
+    mine: role === 'Chef_chantier',
+  });
+  const {
+    requests: equipmentRequests,
+    isLoading: isLoadingEquipmentRequests,
+    isLive: isLiveEquipmentRequests,
+    load: loadEquipmentRequests,
+    upsertLocal: upsertEquipmentRequest,
+  } = equipmentRequestsLive;
+
+  const openEquipmentRequestModal = () => {
+    const defaultProjectId = chefProjects[0]?.id ?? projects[0]?.id ?? 0;
+    setEquipmentRequestForm({
+      needDescription: '',
+      desiredDate: today,
+      projectId: Number(defaultProjectId),
+    });
+    setIsEquipmentModalOpen(true);
+  };
+
+  const handleSubmitEquipmentRequest = async () => {
+    const { needDescription, desiredDate, projectId } = equipmentRequestForm;
+    if (!needDescription.trim() || needDescription.trim().length < 10) {
+      notify(t('resources.equipment.request_form.need_placeholder'), 'error', '/resources');
+      return;
+    }
+    if (!desiredDate || !projectId) {
+      notify(t('resources.equipment.request_submit_error'), 'error', '/resources');
+      return;
+    }
     setIsSubmittingEquipment(true);
     try {
-      await addEquipment({
-        name: item.name,
-        ref: `${item.ref_prefix || 'ENG'}-${Math.floor(Math.random() * 9000) + 1000}`,
-        // ENUM DB: Disponible / En mission / En maintenance / En panne / Hors service
-        status: 'Disponible',
-        projectId
+      const created = await equipmentRequestService.create({
+        needDescription: needDescription.trim(),
+        desiredDate,
+        projectId: Number(projectId),
       });
       addLog({
         module: 'Ressources',
-        action: `Ajout d'engin: ${item.name} pour ${projectName}`,
+        action: `Demande véhicule ${created.ref} : ${created.needDescription.slice(0, 60)}`,
         user: name || 'Utilisateur',
-        type: 'info'
+        type: 'info',
       });
-      notify(t('resources.notifications.equipment_added', { name: item.name, project: projectName }), 'success', '/resources');
+      notify(
+        t('resources.equipment.request_submitted', { ref: created.ref }),
+        created.status === 'Erreur envoi' ? 'warning' : 'success',
+        '/resources'
+      );
       setIsEquipmentModalOpen(false);
+      upsertEquipmentRequest(created);
+      loadEquipmentRequests({ silent: true });
     } catch (err: any) {
-      notify(err?.message || t('resources.errors.equipment_add_error'), 'error', '/resources');
+      console.error('[VAN LOGISTIQUE FRONT] handleSubmitEquipmentRequest:', err?.message, err);
+      notify(err?.message || t('resources.equipment.request_submit_error'), 'error', '/resources');
     } finally {
       setIsSubmittingEquipment(false);
     }
   };
 
+  const handleCancelEquipmentRequest = async (req: EquipmentRequest) => {
+    try {
+      const updated = await equipmentRequestService.cancel(req.id);
+      notify(t('resources.equipment.request_cancelled', { ref: updated.ref }), 'info', '/resources');
+      upsertEquipmentRequest(updated);
+    } catch (err: any) {
+      notify(err?.message || t('resources.equipment.request_submit_error'), 'error', '/resources');
+    }
+  };
+
+  const handleRetryEquipmentRequest = async (req: EquipmentRequest) => {
+    try {
+      const updated = await equipmentRequestService.retry(req.id);
+      notify(
+        t('resources.equipment.request_submitted', { ref: updated.ref }),
+        updated.status === 'Erreur envoi' ? 'warning' : 'success',
+        '/resources'
+      );
+      upsertEquipmentRequest(updated);
+      loadEquipmentRequests({ silent: true });
+    } catch (err: any) {
+      console.error('[VAN LOGISTIQUE FRONT] handleRetryEquipmentRequest:', err?.message, err);
+      notify(err?.message || t('resources.equipment.request_submit_error'), 'error', '/resources');
+    }
+  };
 
   const [isSubmittingSubcontract, setIsSubmittingSubcontract] = useState(false);
   const [stockMovementError, setStockMovementError] = useState<string | null>(null);
@@ -680,8 +897,10 @@ export const ResourcesPage = () => {
       return;
     }
 
-    if (!newSubcontract.amount || Number(newSubcontract.amount) <= 0) {
-      notify('Le montant doit être supérieur à 0', 'error', '/resources');
+    const tasksPayload = buildTasksPayload();
+    const montant = sumTaskCosts(tasksPayload);
+    if (!tasksPayload.length || montant <= 0) {
+      notify('Ajoutez au moins une tâche avec un montant supérieur à 0', 'error', '/resources');
       return;
     }
 
@@ -695,37 +914,35 @@ export const ResourcesPage = () => {
       setIsSubmittingSubcontract(true);
 
       if (editingContract) {
-        const tasksPayload = useLots
-          ? newSubcontract.lots.flatMap(lot =>
-            lot.tasks.filter(t => t.trim() !== '').map(t => ({ title: t, lotNumber: lot.lotNumber, lotName: lot.lotName }))
-          )
-          : newSubcontract.tasks.filter(t => t.trim() !== '').map((t) => ({ title: t, lotNumber: 1, lotName: 'Lot 1' }));
+        const tasksWithIds = tasksPayload.map((t) => {
+          const existing = (editingContract.tasks || []).find(
+            (et: any) => et.title === t.title && (et.lotNumber || 1) === t.lotNumber,
+          );
+          return existing?.id ? { ...t, id: Number(existing.id), completed: existing.completed, paid: existing.paid } : t;
+        });
 
-        const updates = {
+        await updateSubcontract(editingContract.id, {
           entreprise: newSubcontract.company,
           objet: newSubcontract.task,
           projectId: newSubcontract.projectId,
-          montant: Math.round(Number(newSubcontract.amount) || 0),
-          tasks: tasksPayload
-        };
-        await updateSubcontract(editingContract.id, updates);
+          montant: Math.round(montant),
+          startDate: newSubcontract.startDate || undefined,
+          endDate: newSubcontract.endDate || undefined,
+          niu: newSubcontract.niu,
+          tasks: tasksWithIds,
+        });
         notify(`Contrat de ${newSubcontract.company} mis à jour.`, 'success', '/resources');
       } else {
-        // Construire la liste des tâches depuis les lots ou la liste simple
-        const tasksPayload = useLots
-          ? newSubcontract.lots.flatMap(lot =>
-            lot.tasks.filter(t => t.trim() !== '').map(t => ({ title: t, lotNumber: lot.lotNumber, lotName: lot.lotName }))
-          )
-          : newSubcontract.tasks.filter(t => t.trim() !== '').map((t) => ({ title: t, lotNumber: 1, lotName: 'Lot 1' }));
-
         await addSubcontract({
           entreprise: newSubcontract.company,
           objet: newSubcontract.task,
           projectId: newSubcontract.projectId,
-          montant: Math.round(Number(newSubcontract.amount) || 0),
+          montant: Math.round(montant),
           progress: 0,
           startDate: newSubcontract.startDate || undefined,
-          tasks: tasksPayload
+          endDate: newSubcontract.endDate || undefined,
+          niu: newSubcontract.niu,
+          tasks: tasksPayload,
         });
         addLog({
           module: 'Ressources',
@@ -771,14 +988,30 @@ export const ResourcesPage = () => {
       setSelectedContract({ ...contract, tasks: updatedTasks, progress });
     }
 
-    // Call backend
-    await contextToggleSubcontractTask(contractId, taskId);
+    const normalized = await contextToggleSubcontractTask(contractId, taskId);
+    if (selectedContract && selectedContract.id === contractId) {
+      setSelectedContract(normalized);
+    }
   };
 
   const handleServiceProviderSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newServiceProvider.name || !newServiceProvider.projectId || !newServiceProvider.totalCost) {
-      notify('Le nom, le chantier et le coût total sont obligatoires', 'error');
+    const tasksPayload = newServiceProvider.tasks
+      .filter((t) => t.title.trim() !== '')
+      .map((t) => ({
+        title: t.title.trim(),
+        cost: Number(t.cost || 0),
+        lotNumber: 1,
+        lotName: 'Prestation',
+      }));
+    const montant = sumTaskCosts(tasksPayload);
+
+    if (!newServiceProvider.name || !newServiceProvider.projectId) {
+      notify('Le nom et le chantier sont obligatoires', 'error');
+      return;
+    }
+    if (!tasksPayload.length || montant <= 0) {
+      notify('Ajoutez au moins une tâche avec un montant supérieur à 0', 'error');
       return;
     }
 
@@ -787,14 +1020,9 @@ export const ResourcesPage = () => {
       await addSubcontract({
         entreprise: newServiceProvider.name,
         projectId: newServiceProvider.projectId,
-        montant: parseFloat(newServiceProvider.totalCost),
+        montant,
         type: 'provider',
-        tasks: newServiceProvider.tasks.filter(t => t.trim() !== '').map(t => ({
-          title: t,
-          cost: 0,
-          lotNumber: 1,
-          lotName: 'Prestation'
-        }))
+        tasks: tasksPayload,
       });
 
       notify('Prestataire de service ajouté avec succès', 'success');
@@ -803,8 +1031,9 @@ export const ResourcesPage = () => {
         name: '',
         projectId: projects[0]?.id || 0,
         tasks: [],
-        totalCost: '',
       });
+      setNewProviderTaskTitle('');
+      setNewProviderTaskCost('');
     } catch (err: any) {
       notify(err?.message || t('resources.errors.provider_add_error'), 'error');
     } finally {
@@ -813,36 +1042,55 @@ export const ResourcesPage = () => {
   };
 
   const handlePayProvider = async (provider: any) => {
-    if (provider.paymentStatus === 'Payé') return;
+    const payable = getPayableAmount(provider);
+    if (payable <= 0) {
+      notify('Cochez des tâches terminées avec un montant pour effectuer un paiement', 'warning', '/resources');
+      return;
+    }
 
-    if (window.confirm(t('resources.errors.confirm_payment', { amount: Number(provider.montant).toLocaleString(), company: provider.company }))) {
-      setIsPayingProvider(true);
-      try {
-        await updateSubcontract(provider.id, { paymentStatus: 'Payé' });
+    const taskLabels = (provider.tasks || [])
+      .filter((t: any) => t.completed && !t.paid)
+      .map((t: any) => t.title)
+      .join(', ');
 
-        await addTransaction({
-          type: 'expense',
-          category: provider.type === 'provider' ? 'Main-d\'œuvre - Prestataire' : 'Sous-traitance',
-          provider: provider.company,
-          projectId: provider.projectId,
-          amount: provider.montant,
-          description: `Paiement ${provider.type === 'provider' ? 'prestataire' : 'sous-traitant'}: ${provider.company}`,
-          status: 'Validé',
-          transactionDate: new Date().toISOString().split('T')[0]
-        });
+    if (
+      !window.confirm(
+        `Confirmer le paiement de ${formatFcfa(payable)} pour ${provider.company} ?\nTâches : ${taskLabels}`,
+      )
+    ) {
+      return;
+    }
 
-        notify(`Paiement de ${provider.company} enregistré avec succès`, 'success');
-        addLog({
-          module: 'Resources',
-          action: `Paiement ${provider.type === 'provider' ? 'prestataire' : 'sous-traitant'}: ${provider.company} (${Number(provider.montant).toLocaleString()} FCFA)`,
-          user: name || 'Chef Chantier',
-          type: 'success'
-        });
-      } catch (err: any) {
-        notify(err?.message || 'Erreur lors du paiement', 'error');
-      } finally {
-        setIsPayingProvider(false);
+    setIsPayingProvider(true);
+    try {
+      const { amount, subcontract: updatedContract } = await paySubcontractCompletedTasks(provider.id);
+
+      await addTransaction({
+        type: 'expense',
+        category: provider.type === 'provider' ? "Main-d'œuvre - Prestataire" : 'Sous-traitance',
+        provider: provider.company,
+        projectId: provider.projectId,
+        amount,
+        description: `Paiement tâches terminées — ${provider.company}`,
+        status: 'Validé',
+        transactionDate: new Date().toISOString().split('T')[0],
+      });
+
+      if (selectedContract?.id === provider.id && updatedContract) {
+        setSelectedContract(updatedContract);
       }
+
+      notify(`Paiement de ${formatFcfa(amount)} enregistré pour ${provider.company}`, 'success', '/resources');
+      addLog({
+        module: 'Resources',
+        action: `Paiement ${provider.type === 'provider' ? 'prestataire' : 'sous-traitant'}: ${provider.company} (${amount.toLocaleString()} FCFA)`,
+        user: name || 'Chef Chantier',
+        type: 'success',
+      });
+    } catch (err: any) {
+      notify(err?.message || 'Erreur lors du paiement', 'error');
+    } finally {
+      setIsPayingProvider(false);
     }
   };
 
@@ -898,11 +1146,12 @@ export const ResourcesPage = () => {
             movementDate: new Date().toISOString().split('T')[0],
             type: 'Transfert',
             item: newStockMovement.item,
+            materialId: newStockMovement.materialId,
             quantity: Number(newStockMovement.qty || 0),
             unit: newStockMovement.unit,
             projectId: newStockMovement.fromProjectId,
             toProjectId: newStockMovement.toProjectId,
-            note: `Transfert vers ${getProjectNameById(newStockMovement.toProjectId)}`
+            note: `Transfert vers ${getProjectNameById(newStockMovement.toProjectId)}`,
           });
         } catch (err: any) {
           if (err?.message?.includes('Stock insuffisant') || err?.message?.includes('insufficient stock')) {
@@ -915,6 +1164,16 @@ export const ResourcesPage = () => {
         } finally {
           setIsSubmittingStockMovement(false);
         }
+        setStockInventoryKey((k) => k + 1);
+        addLog({
+          module: 'Ressources',
+          action: `Mouvement de stock (Transfert): ${newStockMovement.item} (${newStockMovement.qty} ${newStockMovement.unit}) - ${projectLabel}`,
+          user: name || 'Utilisateur',
+          type: 'info',
+        });
+        notify('Mouvement de stock (Transfert) enregistré.', 'success', '/resources');
+        setStockMovementStep(2);
+        return;
       } else {
         const typeLabel = stockMovementType === 'entry' ? 'Entrée' : 'Sortie';
         const effectiveProjectId = stockMovementType === 'entry' ? newStockMovement.toProjectId : newStockMovement.fromProjectId;
@@ -933,9 +1192,10 @@ export const ResourcesPage = () => {
             movementDate: new Date().toISOString().split('T')[0],
             type: typeLabel,
             item: newStockMovement.item,
+            materialId: newStockMovement.materialId,
             quantity: Number(newStockMovement.qty || 0),
             unit: newStockMovement.unit,
-            projectId: Number(effectiveProjectId)
+            projectId: Number(effectiveProjectId),
           });
         } catch (err: any) {
           if (err?.message?.includes('Stock insuffisant') || err?.message?.includes('insufficient stock')) {
@@ -959,6 +1219,7 @@ export const ResourcesPage = () => {
         type: stockMovementType === 'exit' ? 'warning' : 'info'
       });
       notify(`Mouvement de stock (${labelForLog}) enregistré.`, 'success', '/resources');
+      setStockInventoryKey((k) => k + 1);
 
       // Passer à l'étape 2 pour afficher le message de succès
       setStockMovementStep(2);
@@ -968,22 +1229,23 @@ export const ResourcesPage = () => {
     // Si on est à l'étape 2, fermer la modale
     if (stockMovementStep === 2) {
       // Réinitialiser selon la vue active : warehouse → projectId=0, projects → premier projet
-      const defaultPid  = stockView === 'warehouse' ? 0 : (projects[0]?.id  || 0);
+      const defaultPid = stockView === 'warehouse' ? 0 : (projects[0]?.id || 0);
       const defaultName = stockView === 'warehouse' ? 'Magasin Central' : (projects[0]?.name || '');
       setIsStockMovementModalOpen(false);
       setStockMovementStep(1);
       setStockMovementError(null);
       setNewStockMovement({
-        item: 'Ciment CPJ 35',
+        item: '',
+        materialId: undefined,
         qty: '',
-        unit: 'Tonnes',
+        unit: '',
         fromProjectId: defaultPid,
         toProjectId: defaultPid,
         chantier: defaultName,
         fromChantier: defaultName,
         toChantier: defaultName,
         receiver: '',
-        docRef: ''
+        docRef: '',
       });
     }
   };
@@ -1000,6 +1262,16 @@ export const ResourcesPage = () => {
       window.removeEventListener('open-inventory', handleOpenInventory);
     };
   }, []);
+
+  const availableTabs = [
+    { id: 'purchases', label: t('resources.tabs.purchases'), icon: ShoppingCart, roles: ['Directeur technique', 'Chef_chantier'] },
+    { id: 'stock', label: t('resources.tabs.stock'), icon: Package, roles: ['Directeur technique', 'Gestionnaire de stocks', 'Chef_chantier'] },
+    { id: 'equipment', label: t('resources.tabs.equipment'), icon: Truck, roles: ['Directeur technique', 'Chef_chantier'] },
+    { id: 'hr', label: t('resources.tabs.hr'), icon: Users, roles: ['Directeur technique', 'Chef_chantier'] },
+    { id: 'subcontracting', label: t('resources.tabs.subcontracting'), icon: Handshake, roles: ['Directeur technique', 'Chef_chantier'] },
+    { id: 'pointage', label: t('resources.pointage.title'), icon: Clock, roles: ['Directeur technique', 'Chef_chantier'] },
+  ].filter(tab => tab.roles.includes(role || ''));
+
   return (
     <div className="space-y-8 pb-12">
       {/* Header */}
@@ -1007,25 +1279,16 @@ export const ResourcesPage = () => {
         <div>
           <div className="flex items-center gap-2 text-[var(--color-primary)] font-bold text-sm uppercase tracking-widest mb-2">
             <Package className="w-4 h-4" />
-            <span>{role === 'RH' ? t('resources.tabs.hr') : t('resources.execution_cameroon')}</span>
+            <span>{t('resources.execution_cameroon')}</span>
           </div>
-          <h1 className="text-4xl font-black text-slate-900 tracking-tighter">{role === 'RH' ? t('resources.tabs.hr') : t('resources.title')}</h1>
+          <h1 className="text-4xl font-black text-slate-900 tracking-tighter">{t('resources.title')}</h1>
           <p className="text-slate-500 font-medium mt-1">{t('resources.header_desc')}</p>
         </div>
         <div className="flex flex-wrap gap-3">
-          {role === 'Chef_chantier' && (
+          {canManagePurchases && (
             <Button variant="outline" onClick={() => {
-              setNewPurchase({
-                item: 'Ciment CPJ 35',
-                qty: '',
-                unit: 'Tonnes',
-                unitPrice: '',
-                provider: '',
-                priority: 'Normale',
-                projectId: projects[0]?.id || 0,
-                chantier: projects[0]?.name || '',
-                deliveryDate: new Date().toISOString().split('T')[0]
-              });
+              resetPurchaseForm();
+              setPurchaseStep(1);
               setIsPurchaseModalOpen(true);
             }} className="bg-white border-slate-200 font-bold">
               <ShoppingCart className="w-5 h-5 mr-2" />
@@ -1036,37 +1299,31 @@ export const ResourcesPage = () => {
         </div>
       </div>
 
-      {/* Tabs Navigation */}
-      <div className="flex bg-slate-100 p-1.5 rounded-2xl overflow-x-auto no-scrollbar w-full sm:w-fit">
-        {[
-          { id: 'purchases', label: t('resources.tabs.purchases'), icon: ShoppingCart, roles: ['Directeur_technique', 'Chef_chantier'] },
-          { id: 'stock', label: t('resources.tabs.stock'), icon: Package, roles: ['Directeur_technique', 'Chef_chantier', 'Technicien_chantier'] },
-          { id: 'equipment', label: t('resources.tabs.equipment'), icon: Truck, roles: ['Directeur_technique', 'Chef_chantier', 'Technicien_chantier'] },
-          { id: 'hr', label: t('resources.tabs.hr'), icon: Users, roles: ['Directeur_technique', 'Chef_chantier', 'RH'] },
-          { id: 'subcontracting', label: t('resources.tabs.subcontracting'), icon: Handshake, roles: ['Directeur_technique', 'Chef_chantier'] },
-          { id: 'pointage', label: t('resources.pointage.title'), icon: Clock, roles: ['Directeur_technique', 'Chef_chantier', 'Technicien_chantier', 'RH'] },
-        ].filter(tab => tab.roles.includes(role || '')).map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id as any)}
-            className={cn(
-              "flex items-center gap-2 px-4 sm:px-6 py-3 rounded-xl text-xs sm:text-sm font-bold transition-all whitespace-nowrap flex-shrink-0",
-              activeTab === tab.id ? "bg-white shadow-md text-[var(--color-primary)]" : "text-slate-500 hover:text-slate-700"
-            )}
-          >
-            <tab.icon className="w-3 h-3 sm:w-4 sm:h-4" />
-            <span className="hidden sm:inline">{tab.label}</span>
-            <span className="sm:hidden">
-              {tab.id === 'purchases' ? 'Achats' :
-                tab.id === 'stock' ? 'Stocks' :
-                  tab.id === 'equipment' ? 'Engins' :
-                    tab.id === 'hr' ? 'RH' :
-                      tab.id === 'subcontracting' ? 'ST' :
-                        tab.id === 'pointage' ? 'Points' : tab.label}
-            </span>
-          </button>
-        ))}
-      </div>
+      {availableTabs.length > 1 && (
+        <div className="flex bg-slate-100 p-1.5 rounded-2xl overflow-x-auto no-scrollbar w-full sm:w-fit">
+          {availableTabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id as any)}
+              className={cn(
+                "flex items-center gap-2 px-4 sm:px-6 py-3 rounded-xl text-xs sm:text-sm font-bold transition-all whitespace-nowrap flex-shrink-0",
+                activeTab === tab.id ? "bg-white shadow-md text-[var(--color-primary)]" : "text-slate-500 hover:text-slate-700"
+              )}
+            >
+              <tab.icon className="w-3 h-3 sm:w-4 sm:h-4" />
+              <span className="hidden sm:inline">{tab.label}</span>
+              <span className="sm:hidden">
+                {tab.id === 'purchases' ? 'Achats' :
+                  tab.id === 'stock' ? 'Stocks' :
+                    tab.id === 'equipment' ? 'Engins' :
+                      tab.id === 'hr' ? 'Pers.' :
+                        tab.id === 'subcontracting' ? 'ST' :
+                          tab.id === 'pointage' ? 'Points' : tab.label}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Tab Content */}
       <AnimatePresence mode="wait">
@@ -1095,7 +1352,7 @@ export const ResourcesPage = () => {
                           const dataToExport = purchases
                             .sort((a, b) => new Date(b.deliveryDate || b.date || 0).getTime() - new Date(a.deliveryDate || a.date || 0).getTime())
                             .map(p => ({
-                              'RÉFÉRENCE': `BC-${p.id}`,
+                              'RÉFÉRENCE': p.orderRef || p.ref || `BC-${p.id}`,
                               'DATE': p.deliveryDate || p.date ? new Date(p.deliveryDate || p.date).toLocaleDateString('fr-FR') : 'N/A',
                               'PROJET': getProjectNameById(p.projectId),
                               'DÉSIGNATION': p.item,
@@ -1113,196 +1370,39 @@ export const ResourcesPage = () => {
                       <Button variant="outline" size="sm" className="h-9 px-4 font-bold">Filtres</Button>
                     </div>
                   </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full">
-                      <thead>
-                        <tr className="text-left text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] border-b border-slate-100">
-                          <th className="px-6 py-4">{t('resources.purchases.ref')}</th>
-                          <th className="px-6 py-4">{t('common.designation')}</th>
-                          <th className="px-6 py-4">{t('resources.purchases.supplier')}</th>
-                          <th className="px-6 py-4 text-right">Quantité</th>
-                          <th className="px-6 py-4 text-right">{t('resources.purchases.unit_price')}</th>
-                          <th className="px-6 py-4 text-right">Montant TTC (FCFA)</th>
-                          <th className="px-6 py-4">{t('resources.purchases.delivery_date')}</th>
-                          <th className="px-6 py-4">Statut</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-50">
-                        {purchases.sort((a, b) => new Date(b.deliveryDate || b.date || 0).getTime() - new Date(a.deliveryDate || a.date || 0).getTime()).map(p => (
-                          <tr
-                            key={`history-${p.id}`}
-                            className={cn("hover:bg-slate-50/80 transition-colors", p.status === 'Validé' ? "cursor-pointer" : "")}
-                            onClick={() => {
-                              if (p.status === 'Validé') {
-                                setPurchaseToUpdate(p);
-                                setIsConfirmModalOpen(true);
-                              }
-                            }}
-                          >
-                            <td className="px-6 py-4 text-xs font-black text-slate-900">BC-{p.id}</td>
-                            <td className="px-6 py-4 text-xs font-bold text-slate-700">{p.item}</td>
-                            <td className="px-6 py-4 text-xs font-medium text-slate-500">{p.provider || 'N/A'}</td>
-                            <td className="px-6 py-4 text-xs font-black text-slate-900 text-right">{p.quantity || p.qty || 0}</td>
-                            <td className="px-6 py-4 text-xs font-black text-slate-900 text-right">{(p.unitPrice || 0).toLocaleString('fr-FR')}</td>
-                            <td className="px-6 py-4 text-xs font-black text-slate-900 text-right">{(p.total || (Number(p.quantity || p.qty || 0) * Number(p.unitPrice || 0))).toLocaleString('fr-FR')}</td>
-                            <td className="px-6 py-4 text-xs font-medium text-slate-500">{p.deliveryDate || p.date}</td>
-                            <td className="px-6 py-4">
-                              <span
-                                className={cn(
-                                  "text-[10px] font-black uppercase tracking-wider px-2 py-1 rounded-md",
-                                  p.status === 'Livré' ? "bg-slate-100 text-slate-700" :
-                                    p.status === 'Validé' ? "bg-emerald-100 text-emerald-700" :
-                                      "bg-amber-100 text-amber-700"
-                                )}
-                              >
-                                {p.status}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                  <PurchaseHistoryAccordion
+                    groups={purchaseGroups}
+                    getProjectName={getProjectNameById}
+                    onConfirmDelivery={(p) => {
+                      setPurchaseToUpdate(p);
+                      setIsConfirmModalOpen(true);
+                    }}
+                  />
                 </Card>
               </div>
             </div>
           )}
 
           {activeTab === 'stock' && (
-            <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-300">
-              {/* Sélecteur de vue Stock */}
-              <div className="flex bg-slate-200/50 p-1 rounded-xl w-fit">
-                <button
-                  onClick={() => { setStockView('projects'); setSelectedStockProject(null); }}
-                  className={cn(
-                    "px-4 py-2 rounded-lg text-xs font-black uppercase tracking-widest transition-all",
-                    stockView === 'projects' ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-700"
-                  )}
-                >
-                  {t('resources.tabs.stock')}
-                </button>
-                <button
-                  onClick={() => { setStockView('warehouse'); setSelectedStockProject(null); }}
-                  className={cn(
-                    "px-4 py-2 rounded-lg text-xs font-black uppercase tracking-widest transition-all",
-                    stockView === 'warehouse' ? "bg-[var(--color-primary)] text-white shadow-sm" : "text-slate-500 hover:text-slate-700"
-                  )}
-                >
-                  {t('resources.stock.central_warehouse')}
-                </button>
-              </div>
-
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-                <div>
-                  <h3 className="text-xl font-black text-slate-900 tracking-tight">
-                    {stockView === 'warehouse' ? t('resources.stock.warehouse_management') : t('resources.stock.project_logistics')}
-                  </h3>
-                  <p className="text-xs text-slate-400 font-bold uppercase tracking-widest mt-1">
-                    {stockView === 'warehouse' ? t('resources.stock.reserve_inventory') : t('resources.stock.material_tracking')}
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-3">
-                  {stockView === 'projects' && (
-                    <div className="flex items-center gap-2">
-                      <Filter className="w-3 h-3 text-slate-400" />
-                      <select
-                        value={selectedStockProject ?? ''}
-                        onChange={(e) => setSelectedStockProject(e.target.value ? Number(e.target.value) : null)}
-                        className="text-[10px] font-bold text-slate-500 uppercase tracking-widest bg-transparent outline-none cursor-pointer hover:text-[var(--color-primary)] transition-colors"
-                      >
-                        <option value="">{t('resources.all_sites')}</option>
-                        {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                      </select>
-                    </div>
-                  )}
-                  <div className="relative flex-1 min-w-[180px]">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                    <input
-                      type="text"
-                      placeholder={t('resources.placeholders.filter_article')}
-                      value={stockSearchQuery}
-                      onChange={(e) => setStockSearchQuery(e.target.value)}
-                      className="w-full pl-10 pr-4 py-2 bg-slate-100 border border-transparent rounded-xl text-xs outline-none focus:bg-white focus:border-slate-200 focus:ring-2 focus:ring-[var(--color-primary)] transition-all"
-                    />
-                  </div>
-                  <Button onClick={() => {
-                    // ── Initialiser le formulaire selon la vue active ──────────────────────
-                    // warehouse → projectId=0 (Magasin Central) ; projects → premier projet
-                    const defaultPid  = stockView === 'warehouse' ? 0 : (projects[0]?.id  || 0);
-                    const defaultName = stockView === 'warehouse' ? 'Magasin Central' : (projects[0]?.name || '');
-                    setStockMovementType('entry');
-                    setStockMovementStep(1);
-                    setStockMovementError(null);
-                    setNewStockMovement({
-                      item: 'Ciment CPJ 35',
-                      qty: '',
-                      unit: 'Tonnes',
-                      fromProjectId: defaultPid,
-                      toProjectId: defaultPid,
-                      chantier: defaultName,
-                      fromChantier: defaultName,
-                      toChantier: defaultName,
-                      receiver: '',
-                      docRef: ''
-                    });
-                    setIsStockMovementModalOpen(true);
-                  }} className="font-bold whitespace-nowrap shadow-lg shadow-blue-900/20">
-                    <ArrowRightLeft className="w-4 h-4 mr-2" /> Mouvement
-                  </Button>
-                </div>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                {calculatedStock.length > 0 ? (
-                  calculatedStock.filter(item => item.title.toLowerCase().includes(stockSearchQuery.toLowerCase()))
-                    .map((item, i) => (
-                      <StockCard key={`stock-${i}`} {...item} />
-                    ))
-                ) : (
-                  <div className="lg:col-span-4 py-12 text-center bg-slate-50 rounded-3xl border-2 border-dashed border-slate-200">
-                    <Package className="w-12 h-12 text-slate-300 mx-auto mb-4" />
-                    <p className="text-slate-400 font-bold">{t('resources.stock.no_stock')}</p>
-                  </div>
-                )}
-              </div>
-
-              <Card className="p-8 border-none shadow-xl shadow-slate-200/50">
-                <div className="flex items-center justify-between mb-8">
-                  <h3 className="text-lg font-black text-slate-900 tracking-tight">Journal {stockView === 'warehouse' ? 'Entrepôt' : 'Chantiers'}</h3>
-                  <Button variant="outline" size="sm" className="font-bold" onClick={() => setIsFullLogbookModalOpen(true)}>{t('common.full_log')}</Button>
-                </div>
-                <div className="space-y-4">
-                  {stockMovements
-                    .filter(m => {
-                      if (stockView === 'warehouse') return Number(m.projectId) === 0;
-                      return selectedStockProject === null ? Number(m.projectId) !== 0 : Number(m.projectId) === selectedStockProject;
-                    })
-                    .slice(0, 5).map((movement, i) => (
-                      <div key={`movement-${i}`} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                        <div className="flex flex-col sm:flex-row sm:items-center gap-4">
-                          <div className={cn(
-                            "w-10 h-10 rounded-xl flex items-center justify-center",
-                            movement.type === 'Sortie' ? "bg-red-50 text-red-500" : "bg-emerald-50 text-emerald-500"
-                          )}>
-                            {movement.type === 'Sortie' ? <ArrowRightLeft className="w-5 h-5" /> : <Plus className="w-5 h-5" />}
-                          </div>
-                          <div>
-                            <p className="text-sm font-black text-slate-900">{movement.type} Stock - {movement.item}</p>
-                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                              {getProjectNameById(movement.projectId)} • Par: {movement.user}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <p className={cn("text-sm font-black", movement.type === 'Sortie' ? "text-red-600" : "text-emerald-600")}>
-                            {movement.type === 'Sortie' ? '-' : '+'}{movement.qty} {movement.unit}
-                          </p>
-                          <p className="text-[10px] font-medium text-slate-400">{movement.date}</p>
-                        </div>
-                      </div>
-                    ))}
-                </div>
-              </Card>
-            </div>
+            <StockManagementPanel
+              key={stockInventoryKey}
+              stockView={stockView}
+              setStockView={setStockView}
+              selectedStockProject={selectedStockProject}
+              setSelectedStockProject={setSelectedStockProject}
+              projects={stockProjectList}
+              stockMovements={stockMovements}
+              role={role}
+              canManageStock={role === 'Gestionnaire de stocks' || role === 'Directeur technique'}
+              siteOnlyMode={role === 'Chef_chantier'}
+              onOpenMovement={openStockMovement}
+              onOpenLogbook={() => setIsFullLogbookModalOpen(true)}
+              onOpenInventory={() => setIsInventoryModalOpen(true)}
+              stockSearchQuery={stockSearchQuery}
+              setStockSearchQuery={setStockSearchQuery}
+              showViewToggle={role === 'Directeur technique'}
+              onInventoryChange={() => setStockInventoryKey((k) => k + 1)}
+            />
           )}
 
           {activeTab === 'equipment' && (
@@ -1318,7 +1418,7 @@ export const ResourcesPage = () => {
                         onChange={(e) => setSelectedEquipmentProject(e.target.value ? Number(e.target.value) : null)}
                         className="text-[10px] font-bold text-slate-500 uppercase tracking-widest bg-transparent outline-none cursor-pointer hover:text-[var(--color-primary)] transition-colors"
                       >
-                        <option value="">{t('resources.all_sites')}</option>
+                        <option key="filter-all-sites" value="">{t('resources.all_sites')}</option>
                         {projects.map(p => (
                           <option key={p.id} value={p.id}>{p.name}</option>
                         ))}
@@ -1326,12 +1426,23 @@ export const ResourcesPage = () => {
                     </div>
                   )}
                 </div>
-                {role === 'Chef_chantier' && (
-                  <Button onClick={() => setIsEquipmentModalOpen(true)} className="font-bold shadow-lg shadow-blue-900/10">
+                {canManageEquipment && (
+                  <Button onClick={openEquipmentRequestModal} className="font-bold shadow-lg shadow-blue-900/10">
                     <Plus className="w-4 h-4 mr-2" /> {t('resources.equipment.request')}
                   </Button>
                 )}
               </div>
+
+              <EquipmentRequestsPanel
+                requests={equipmentRequests}
+                isLoading={isLoadingEquipmentRequests}
+                isLive={isLiveEquipmentRequests}
+                showCancel={canManageEquipment}
+                getProjectLabel={(req) => req.project?.name || getProjectNameById(req.projectId)}
+                onCancel={handleCancelEquipmentRequest}
+                onRetry={handleRetryEquipmentRequest}
+              />
+
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
                 {equipmentList
                   .filter(item => selectedEquipmentProject === null || item.projectId === selectedEquipmentProject)
@@ -1395,51 +1506,62 @@ export const ResourcesPage = () => {
                     onChange={(e) => setSelectedProjectFilter(e.target.value ? Number(e.target.value) : null)}
                     value={selectedProjectFilter ?? ''}
                   >
-                    <option value="">Tous les chantiers</option>
+                    <option key="filter-all-projects" value="">Tous les chantiers</option>
                     {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                   </select>
-                  {(role === 'Chef_chantier' || role === 'RH' || role === 'Directeur_technique') && (
-                    <Button onClick={() => setIsUnassignedModalOpen(true)} className="font-bold shadow-lg shadow-blue-900/10">
-                      <UserPlus className="w-4 h-4 mr-2" /> Affecter du Personnel
-                    </Button>
+                  {canManagePersonnel && (
+                    <div className="flex gap-2">
+                      {isChefSiteRole && (
+                        <Button onClick={() => setIsEmployeeModalOpen(true)} className="font-bold shadow-lg shadow-blue-900/10">
+                          <Plus className="w-4 h-4 mr-2" /> {t('resources.modals.add_worker_site')}
+                        </Button>
+                      )}
+                      {role === 'Directeur technique' && (
+                        <Button onClick={() => setIsUnassignedModalOpen(true)} className="font-bold shadow-lg shadow-blue-900/10" variant="outline">
+                          <UserPlus className="w-4 h-4 mr-2" /> Affecter du Personnel
+                        </Button>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                <Card className="p-6 border-none shadow-lg shadow-slate-200/50 flex items-center gap-4">
-                  <div className="w-12 h-12 bg-blue-100 rounded-2xl flex items-center justify-center text-blue-600">
-                    <Users className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{t('resources.hr.total_staff')}</p>
-                    <p className="text-2xl font-black text-slate-900">{employees.length}</p>
-                  </div>
-                </Card>
-                <Card className="p-6 border-none shadow-lg shadow-slate-200/50 flex items-center gap-4">
-                  <div className="w-12 h-12 bg-emerald-100 rounded-2xl flex items-center justify-center text-emerald-600">
-                    <HardHat className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{t('resources.hr.on_sites')}</p>
-                    <p className="text-2xl font-black text-slate-900">{employees.filter(e => e.projectId && e.projectId !== 0 && !e.isOnLeave).length}</p>
-
-                  </div>
-                </Card>
-                <Card className="p-6 border-none shadow-lg shadow-slate-200/50 flex items-center gap-4">
-                  <div className="w-12 h-12 bg-red-100 rounded-2xl flex items-center justify-center text-red-600">
-                    <AlertCircle className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{t('resources.hr.off_duty')}</p>
-                    <p className="text-2xl font-black text-slate-900">{employees.filter(e => e.isOnLeave).length}</p>
-
-                  </div>
-                </Card>
-              </div>
+              {role !== 'Chef_chantier' && (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  <Card className="p-6 border-none shadow-lg shadow-slate-200/50 flex items-center gap-4">
+                    <div className="w-12 h-12 bg-blue-100 rounded-2xl flex items-center justify-center text-blue-600">
+                      <Users className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{t('resources.hr.total_staff')}</p>
+                      <p className="text-2xl font-black text-slate-900">{hrStats.total}</p>
+                    </div>
+                  </Card>
+                  <Card className="p-6 border-none shadow-lg shadow-slate-200/50 flex items-center gap-4">
+                    <div className="w-12 h-12 bg-emerald-100 rounded-2xl flex items-center justify-center text-emerald-600">
+                      <HardHat className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{t('resources.hr.on_sites')}</p>
+                      <p className="text-2xl font-black text-slate-900">{hrStats.onSites}</p>
+                    </div>
+                  </Card>
+                  <Card className="p-6 border-none shadow-lg shadow-slate-200/50 flex items-center gap-4">
+                    <div className="w-12 h-12 bg-red-100 rounded-2xl flex items-center justify-center text-red-600">
+                      <AlertCircle className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{t('resources.hr.off_duty')}</p>
+                      <p className="text-2xl font-black text-slate-900">{hrStats.offDuty}</p>
+                    </div>
+                  </Card>
+                </div>
+              )}
 
               <Card className="border-none shadow-xl shadow-slate-200/50 overflow-hidden">
                 <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <h3 className="text-lg font-black text-slate-900 tracking-tight">{t('resources.hr.title')}</h3>
+                  <h3 className="text-lg font-black text-slate-900 tracking-tight">
+                    {role === 'Chef_chantier' ? "Liste de vos Ouvriers Locaux" : t('resources.hr.title')}
+                  </h3>
                   <div className="relative flex-1 max-w-xs">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                     <input
@@ -1456,15 +1578,17 @@ export const ResourcesPage = () => {
                     <thead>
                       <tr className="text-left text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] border-b border-slate-100">
                         <th className="px-6 py-4">Employé</th>
-                        <th className="px-6 py-4">Matricule</th>
+                        {role !== 'Chef_chantier' && <th className="px-6 py-4">Matricule</th>}
                         <th className="px-6 py-4">Poste / Qualification</th>
-                        <th className="px-6 py-4">Affectation</th>
-                        <th className="px-6 py-4">Type Contrat</th>
+                        {role === 'Chef_chantier' && <th className="px-6 py-4">Téléphone</th>}
+                        {role === 'Chef_chantier' && <th className="px-6 py-4">{t('resources.hr.table.weekly_salary')}</th>}
+                        <th className="px-6 py-4">{role === 'Chef_chantier' ? "Chantier d'affectation" : "Affectation"}</th>
+                        {role !== 'Chef_chantier' && <th className="px-6 py-4">Type Contrat</th>}
                         <th className="px-6 py-4">Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-50">
-                      {activeEmployees.map((emp, i) => (
+                      {displayedHrEmployees.map((emp, i) => (
                         <tr
                           key={`employee-${i}`}
                           className="hover:bg-slate-50/80 transition-colors"
@@ -1480,45 +1604,65 @@ export const ResourcesPage = () => {
                               )}
                               <div className="flex flex-col">
                                 <span className="text-xs font-black text-slate-900 leading-tight">{emp.name}</span>
-                                <span className="text-[10px] font-bold text-slate-400 lowercase">{emp.email || 'Pas d\'email'}</span>
+                                {role !== 'Chef_chantier' && (
+                                  <span className="text-[10px] font-bold text-slate-400 lowercase">{emp.email || 'Pas d\'email'}</span>
+                                )}
                               </div>
                             </div>
                           </td>
-                          <td className="px-6 py-4 text-xs font-bold text-slate-500">{emp.matricule}</td>
+                          {role !== 'Chef_chantier' && (
+                            <td className="px-6 py-4 text-xs font-bold text-slate-500">{emp.matricule}</td>
+                          )}
                           <td className="px-6 py-4 text-xs font-bold text-slate-600">
                             <div className="flex flex-col">
                               <span>{emp.role}</span>
-                              {emp.category && <span className="text-[9px] text-slate-400 uppercase tracking-tighter">{emp.category}</span>}
+                              {role !== 'Chef_chantier' && emp.category && emp.category !== 'N/A' && (
+                                <span className="text-[9px] text-slate-400 uppercase tracking-tighter">{emp.category}</span>
+                              )}
                             </div>
                           </td>
+                          {role === 'Chef_chantier' && (
+                            <td className="px-6 py-4 text-xs font-bold text-slate-500">{emp.phone || 'Pas de numéro'}</td>
+                          )}
+                          {role === 'Chef_chantier' && (
+                            <td className="px-6 py-4 text-xs font-black text-emerald-700">
+                              {emp.weeklySalary != null && emp.weeklySalary > 0
+                                ? formatCFA(emp.weeklySalary)
+                                : '—'}
+                            </td>
+                          )}
                           <td className="px-6 py-4 text-xs font-medium text-slate-500">
                             {(!emp.projectId || emp.projectId === 0) ? (
                               <span className="inline-flex items-center gap-1 text-amber-600 bg-amber-50 px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-widest">
                                 <AlertCircle className="w-3 h-3" /> Non assigné
                               </span>
                             ) : (
-                              <span className="text-slate-700 font-bold">{getProjectNameById(emp.projectId)}</span>
+                              <span className="text-slate-700 font-bold">{getEmployeeProjectLabel(emp.projectId)}</span>
                             )}
                           </td>
-                          <td className="px-6 py-4 text-xs font-bold text-slate-900">{emp.contract}</td>
+                          {role !== 'Chef_chantier' && (
+                            <td className="px-6 py-4 text-xs font-bold text-slate-900">{emp.contract}</td>
+                          )}
                           <td className="px-6 py-4">
                             <div className="flex items-center gap-4">
                               {/* Voir Détails */}
-                              <button
-                                title="Voir les détails"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setSelectedEmployeeForDetail(emp);
-                                  setIsEmployeeDetailModalOpen(true);
-                                }}
-                                className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
-                              >
-                                <Eye className="w-4 h-4" />
-                              </button>
+                              {role !== 'Chef_chantier' && (
+                                <button
+                                  title={t('resources.modals.view_details')}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedEmployeeForDetail(emp);
+                                    setIsEmployeeDetailModalOpen(true);
+                                  }}
+                                  className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
+                                >
+                                  <Eye className="w-4 h-4" />
+                                </button>
+                              )}
 
                               {/* Changer Affectation */}
                               <button
-                                title="Changer l'affectation"
+                                title={t('resources.modals.change_assignment')}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   setSelectedResource({ ...emp, type: 'hr' });
@@ -1528,6 +1672,21 @@ export const ResourcesPage = () => {
                               >
                                 <Settings2 className="w-4 h-4" />
                               </button>
+
+                              {/* Supprimer (Uniquement pour les employés locaux) */}
+                              {emp.isLocal && (
+                                <button
+                                  title={t('resources.modals.delete')}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setEmployeeToDelete(emp);
+                                    setIsConfirmDeleteModalOpen(true);
+                                  }}
+                                  className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -1567,7 +1726,7 @@ export const ResourcesPage = () => {
                   </div>
                 </div>
 
-                {stTab === 'contracts' ? (
+                {isDirecteurTechnique && (stTab === 'contracts' ? (
                   <Button onClick={() => {
                     setEditingContract(null);
                     setNewSubcontract({
@@ -1592,7 +1751,7 @@ export const ResourcesPage = () => {
                   >
                     <Plus className="w-4 h-4 mr-2" /> Ajouter un Prestataire
                   </Button>
-                )}
+                ))}
               </div>
 
               {stTab === 'contracts' ? (
@@ -1627,18 +1786,28 @@ export const ResourcesPage = () => {
                           </div>
                         </div>
                         <div className="text-right">
-                          <p className="text-[10px] font-bold text-slate-400 uppercase">Montant Global</p>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase">Montant contrat</p>
                           <p className="text-lg font-black text-slate-900">{st.montant.toLocaleString()} FCFA</p>
+                          {getPaidAmount(st) > 0 && (
+                            <p className="text-[10px] font-bold text-emerald-600 mt-0.5">
+                              Payé : {getPaidAmount(st).toLocaleString()} FCFA
+                            </p>
+                          )}
+                          {hasPayableTasks(st) && (
+                            <p className="text-[10px] font-bold text-amber-600 mt-0.5">
+                              À payer : {getPayableAmount(st).toLocaleString()} FCFA
+                            </p>
+                          )}
                         </div>
                         <div className="flex gap-2">
                           <Button variant="outline" size="sm" className="font-bold rounded-xl" onClick={() => {
                             setSelectedContract(st);
                             setIsContractDetailsModalOpen(true);
                           }}>{t('common.details')}</Button>
-                          
-                          {st.progress === 100 && st.paymentStatus !== 'Payé' && (
-                            <Button 
-                              size="sm" 
+
+                          {hasPayableTasks(st) && (
+                            <Button
+                              size="sm"
                               onClick={() => handlePayProvider(st)}
                               disabled={isPayingProvider}
                               className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg shadow-emerald-900/20"
@@ -1648,43 +1817,45 @@ export const ResourcesPage = () => {
                               ) : (
                                 <CheckCircle2 className="w-4 h-4 mr-2" />
                               )}
-                              Payer
+                              Payer ({getPayableAmount(st).toLocaleString()})
                             </Button>
                           )}
 
-                          {st.paymentStatus === 'Payé' && (
-                             <span className="px-3 py-1.5 bg-emerald-50 text-emerald-600 text-[10px] font-black uppercase tracking-widest rounded-xl border border-emerald-100 flex items-center gap-1.5">
-                               <CheckCircle2 className="w-3.5 h-3.5" /> Payé
-                             </span>
+                          {getPaymentStatusLabel(st) === 'Payé' && !hasPayableTasks(st) && (
+                            <span className="px-3 py-1.5 bg-emerald-50 text-emerald-600 text-[10px] font-black uppercase tracking-widest rounded-xl border border-emerald-100 flex items-center gap-1.5">
+                              <CheckCircle2 className="w-3.5 h-3.5" /> Payé
+                            </span>
                           )}
 
+                          {isDirecteurTechnique && (
                           <Button variant="ghost" size="sm" className="font-bold text-blue-600 hover:bg-blue-50 rounded-xl" onClick={() => {
-                            const reconstructedLots: { lotNumber: number; lotName: string; tasks: string[] }[] = [];
+                            const reconstructedLots: { lotNumber: number; lotName: string; tasks: TaskDraft[] }[] = [];
                             (st.tasks || []).forEach((t: any) => {
                               const lotNum = t.lotNumber || 1;
-                              let lot = reconstructedLots.find(l => l.lotNumber === lotNum);
+                              let lot = reconstructedLots.find((l) => l.lotNumber === lotNum);
                               if (!lot) {
                                 lot = { lotNumber: lotNum, lotName: t.lotName || `Lot ${lotNum}`, tasks: [] };
                                 reconstructedLots.push(lot);
                               }
-                              lot.tasks.push(t.title);
+                              lot.tasks.push({ title: t.title, cost: String(t.cost || 0) });
                             });
 
                             setEditingContract(st);
                             setNewSubcontract({
                               company: st.entreprise,
-                              niu: 'M098765432109',
+                              niu: st.niu || '',
                               projectId: st.projectId,
                               task: st.objet,
                               amount: st.montant.toString(),
                               startDate: st.startDate || '',
                               endDate: st.endDate || '',
-                              tasks: st.tasks.map((t: any) => t.title),
-                              lots: reconstructedLots
+                              tasks: st.tasks.map((t: any) => ({ title: t.title, cost: String(t.cost || 0) })),
+                              lots: reconstructedLots,
                             });
                             setUseLots(reconstructedLots.length > 1 || st.tasks.some((t: any) => t.lotNumber > 1 || (t.lotName && t.lotName !== 'Lot 1')));
                             setIsSubcontractModalOpen(true);
                           }}>{t('common.edit')}</Button>
+                          )}
                         </div>
                       </Card>
                     ))
@@ -1701,7 +1872,9 @@ export const ResourcesPage = () => {
                             <th className="px-6 py-4">Prestataire / Partenaire</th>
                             <th className="px-6 py-4">Chantier</th>
                             <th className="px-6 py-4">Prestations</th>
-                            <th className="px-6 py-4">État Paiement</th>
+                            {subcontracts.some((s) => s.type === 'provider' && shouldShowPaymentStatus(s)) && (
+                              <th className="px-6 py-4">État Paiement</th>
+                            )}
                             <th className="px-6 py-4 text-right">Montant</th>
                             <th className="px-6 py-4 text-right">Actions</th>
                           </tr>
@@ -1709,7 +1882,14 @@ export const ResourcesPage = () => {
                         <tbody className="divide-y divide-slate-50">
                           {subcontracts.filter(s => s.type === 'provider').length === 0 ? (
                             <tr>
-                              <td colSpan={7} className="px-6 py-16 text-center">
+                              <td
+                                colSpan={
+                                  subcontracts.some((s) => s.type === 'provider' && shouldShowPaymentStatus(s))
+                                    ? 7
+                                    : 6
+                                }
+                                className="px-6 py-16 text-center"
+                              >
                                 <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center text-slate-200 mx-auto mb-4">
                                   <Users className="w-8 h-8" />
                                 </div>
@@ -1739,52 +1919,91 @@ export const ResourcesPage = () => {
                                 </td>
                                 <td className="px-6 py-4">
                                   <div className="flex flex-wrap gap-1">
-                                    {provider.tasks.map((t: any, i: number) => (
-                                      <span key={i} className="px-2 py-0.5 bg-slate-100 text-slate-600 text-[9px] font-bold rounded-md border border-slate-200">
+                                    {(provider.tasks || []).map((t: any, i: number) => (
+                                      <span
+                                        key={i}
+                                        className={cn(
+                                          'px-2 py-0.5 text-[9px] font-bold rounded-md border',
+                                          t.paid
+                                            ? 'bg-emerald-50 text-emerald-700 border-emerald-100'
+                                            : t.completed
+                                              ? 'bg-amber-50 text-amber-700 border-amber-100'
+                                              : 'bg-slate-100 text-slate-600 border-slate-200',
+                                        )}
+                                      >
                                         {t.title}
+                                        {Number(t.cost) > 0 && ` · ${Number(t.cost).toLocaleString()}`}
                                       </span>
                                     ))}
                                   </div>
                                 </td>
-                                <td className="px-6 py-4">
-                                  <span className={cn(
-                                    "px-3 py-1 text-[9px] font-black uppercase tracking-widest rounded-full border flex items-center gap-1.5 w-fit",
-                                    provider.paymentStatus === 'Payé'
-                                      ? "bg-emerald-50 text-emerald-600 border-emerald-100"
-                                      : "bg-amber-50 text-amber-600 border-amber-100"
-                                  )}>
-                                    <span className={cn("w-1.5 h-1.5 rounded-full", provider.paymentStatus === 'Payé' ? "bg-emerald-500" : "bg-amber-500")} />
-                                    {provider.paymentStatus || 'En attente'}
+                                {subcontracts.some((s) => s.type === 'provider' && shouldShowPaymentStatus(s)) && (
+                                  <td className="px-6 py-4">
+                                    {shouldShowPaymentStatus(provider) ? (
+                                      <span
+                                        className={cn(
+                                          'px-3 py-1 text-[9px] font-black uppercase tracking-widest rounded-full border flex items-center gap-1.5 w-fit',
+                                          getPaymentStatusLabel(provider) === 'Payé'
+                                            ? 'bg-emerald-50 text-emerald-600 border-emerald-100'
+                                            : 'bg-amber-50 text-amber-600 border-amber-100',
+                                        )}
+                                      >
+                                        <span
+                                          className={cn(
+                                            'w-1.5 h-1.5 rounded-full',
+                                            getPaymentStatusLabel(provider) === 'Payé' ? 'bg-emerald-500' : 'bg-amber-500',
+                                          )}
+                                        />
+                                        {getPaymentStatusLabel(provider)}
+                                      </span>
+                                    ) : null}
+                                  </td>
+                                )}
+                                <td className="px-6 py-4 text-right">
+                                  <span className="text-sm font-black text-slate-900">
+                                    {Number(provider.montant).toLocaleString()}{' '}
+                                    <span className="text-[10px] text-slate-400 ml-1">FCFA</span>
                                   </span>
+                                  {hasPayableTasks(provider) && (
+                                    <p className="text-[10px] font-bold text-amber-600 mt-0.5">
+                                      À payer : {getPayableAmount(provider).toLocaleString()}
+                                    </p>
+                                  )}
                                 </td>
                                 <td className="px-6 py-4 text-right">
-                                  <span className="text-sm font-black text-slate-900">{Number(provider.montant).toLocaleString()} <span className="text-[10px] text-slate-400 ml-1">FCFA</span></span>
-                                </td>
-                                <td className="px-6 py-4 text-right">
-                                  <Button
-                                    size="sm"
-                                    onClick={() => handlePayProvider(provider)}
-                                    disabled={provider.paymentStatus === 'Payé' || isPayingProvider}
-                                    className={cn(
-                                      "h-8 px-4 text-[10px] font-black uppercase tracking-widest gap-2 transition-all rounded-xl",
-                                      provider.paymentStatus === 'Payé'
-                                        ? "bg-slate-100 text-slate-400 border-none opacity-50"
-                                        : "bg-emerald-600 hover:bg-emerald-700 text-white shadow-lg shadow-emerald-900/20"
-                                    )}
-                                  >
-                                    {provider.paymentStatus === 'Payé' ? (
-                                      <>Payé</>
-                                    ) : isPayingProvider ? (
-                                      <>
-                                        <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin mr-1"></div>
-                                        Traitement...
-                                      </>
-                                    ) : (
-                                      <>
-                                        <CheckCircle2 className="w-3.5 h-3.5" /> Valider Paiement
-                                      </>
-                                    )}
-                                  </Button>
+                                  <div className="flex justify-end gap-2">
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-8 px-3 text-[10px] font-black"
+                                      onClick={() => {
+                                        setSelectedContract(provider);
+                                        setIsContractDetailsModalOpen(true);
+                                      }}
+                                    >
+                                      {t('common.details')}
+                                    </Button>
+                                    {hasPayableTasks(provider) ? (
+                                      <Button
+                                        size="sm"
+                                        onClick={() => handlePayProvider(provider)}
+                                        disabled={isPayingProvider}
+                                        className="h-8 px-4 text-[10px] font-black uppercase tracking-widest gap-2 bg-emerald-600 hover:bg-emerald-700 text-white shadow-lg shadow-emerald-900/20 rounded-xl"
+                                      >
+                                        {isPayingProvider ? (
+                                          <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                        ) : (
+                                          <>
+                                            <CheckCircle2 className="w-3.5 h-3.5" /> Payer
+                                          </>
+                                        )}
+                                      </Button>
+                                    ) : getPaymentStatusLabel(provider) === 'Payé' ? (
+                                      <span className="h-8 px-3 flex items-center text-[10px] font-black text-emerald-600 uppercase">
+                                        Payé
+                                      </span>
+                                    ) : null}
+                                  </div>
                                 </td>
                               </tr>
                             ))
@@ -1804,7 +2023,7 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isConfirmModalOpen}
         onClose={() => setIsConfirmModalOpen(false)}
-        title="Confirmer la livraison"
+        title={t('resources.modals.confirm_delivery')}
       >
         <div className="space-y-6">
           <p className="text-sm text-slate-600">Êtes-vous sûr de vouloir changer le statut de la commande {purchaseToUpdate?.item} en "Livré" ? Cette action est irréversible.</p>
@@ -1824,7 +2043,7 @@ export const ResourcesPage = () => {
         isOpen={isPurchaseModalOpen}
         onClose={() => setIsPurchaseModalOpen(false)}
         title={t('resources.purchases.new_request')}
-        size="lg"
+        size="xl"
       >
         <div className="space-y-8">
           <div className="flex items-center justify-between px-12 relative">
@@ -1841,117 +2060,80 @@ export const ResourcesPage = () => {
 
           <form onSubmit={handlePurchaseSubmit} className="space-y-8">
             {purchaseStep === 1 && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 animate-in fade-in slide-in-from-bottom-4 duration-300">
-                <div className="space-y-6">
-                  <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-2">Article & Quantité</h4>
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700">{t('common.designation')} de l'article</label>
-                    <select
-                      value={newPurchase.item}
-                      onChange={(e) => {
-                        const newItem = e.target.value;
-                        setNewPurchase({ ...newPurchase, item: newItem, unit: ITEM_UNITS[newItem] || '' });
-                      }}
-                      className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                    >
-                      {Object.keys(ITEM_UNITS).map(item => (
-                        <option key={item} value={item}>{item}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-300">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-4">
+                    <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-2">
+                      {t('resources.purchases.wizard.step_logistics')}
+                    </h4>
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-bold text-slate-700">{t('resources.purchases.wizard.chantier_label')}</label>
+                      <select
+                        value={purchaseHeader.projectId}
+                        onChange={(e) => {
+                          const projectId = Number(e.target.value);
+                          setPurchaseHeader({
+                            ...purchaseHeader,
+                            projectId,
+                            chantier: getProjectNameById(projectId),
+                          });
+                        }}
+                        className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      >
+                        {projects.map((p) => (
+                          <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                      </select>
+                    </div>
                     <Input
-                      label="Quantité"
-                      type="number"
-                      placeholder="0"
-                      required
-                      value={newPurchase.qty}
-                      onChange={(e) => {
-                        const value = e.target.value;
-                        if (value > 0) {
-                          setNewPurchase({ ...newPurchase, qty: value });
-                        }
-                      }}
-                      min="1"
-                      step="1"
+                      label={`${t('resources.purchases.supplier')} (optionnel)`}
+                      type="text"
+                      placeholder="Ex: FOKOU, QUIFEUROU..."
+                      value={purchaseHeader.provider}
+                      onChange={(e) => setPurchaseHeader({ ...purchaseHeader, provider: e.target.value })}
                     />
                     <Input
-                      label="Unité"
-                      placeholder="Sacs, m3, Tonnes..."
-                      required
-                      value={newPurchase.unit}
-                      onChange={(e) => setNewPurchase({ ...newPurchase, unit: e.target.value })}
+                      label={t('resources.purchases.wizard.delivery_date')}
+                      type="date"
+                      min={today}
+                      value={purchaseHeader.deliveryDate}
+                      onChange={(e) => setPurchaseHeader({ ...purchaseHeader, deliveryDate: e.target.value })}
                     />
                   </div>
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700">Priorité d'Achat</label>
+                  <div className="space-y-4">
+                    <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-2">
+                      {t('resources.purchases.wizard.priority_label')}
+                    </h4>
                     <div className="flex gap-2">
-                      {['Basse', 'Normale', 'Urgente'].map(p => (
+                      {['Basse', 'Normale', 'Urgente'].map((p) => (
                         <button
                           key={p}
                           type="button"
-                          onClick={() => setNewPurchase({ ...newPurchase, priority: p })}
+                          onClick={() => setPurchaseHeader({ ...purchaseHeader, priority: p })}
                           className={cn(
-                            "flex-1 py-2 border rounded-xl text-[10px] font-black uppercase tracking-wider transition-all",
-                            newPurchase.priority === p
-                              ? "bg-[var(--color-primary)] border-[var(--color-primary)] text-white shadow-lg shadow-blue-900/20"
-                              : "bg-white border-slate-200 text-slate-500 hover:bg-slate-50"
+                            'flex-1 py-2 border rounded-xl text-[10px] font-black uppercase tracking-wider transition-all',
+                            purchaseHeader.priority === p
+                              ? 'bg-[var(--color-primary)] border-[var(--color-primary)] text-white shadow-lg shadow-blue-900/20'
+                              : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50',
                           )}
                         >
                           {p}
                         </button>
                       ))}
                     </div>
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-bold text-slate-700">{t('resources.purchases.wizard.notes')}</label>
+                      <textarea
+                        className="w-full h-24 p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                        placeholder={t('resources.purchases.wizard.notes')}
+                        value={purchaseHeader.notes}
+                        onChange={(e) => setPurchaseHeader({ ...purchaseHeader, notes: e.target.value })}
+                      />
+                    </div>
                   </div>
                 </div>
 
-                <div className="space-y-6">
-                  <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-2">Logistique & Destination</h4>
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700">Chantier de destination</label>
-                    <select
-                      value={newPurchase.projectId}
-                      onChange={(e) => { const projectId = Number(e.target.value); setNewPurchase({ ...newPurchase, projectId, chantier: getProjectNameById(projectId) }); }}
-                      className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                    >
-                      {projects.map(p => (
-                        <option key={p.id} value={p.id}>{p.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <Input
-                    label="Prix unitaire estimé (FCFA)"
-                    type="number"
-                    placeholder="0"
-                    value={newPurchase.unitPrice}
-                    onChange={(e) => {
-                      const value = e.target.value;
-                      if (value >= 0) {
-                        setNewPurchase({ ...newPurchase, unitPrice: value });
-                      }
-                    }}
-                    min="0"
-                    step="1"
-                  />
-                  <Input
-                    label={`${t('resources.purchases.supplier')} souhaité (optionnel)`}
-                    type="text"
-                    placeholder="Ex: FOKOU, QUIFEUROU..."
-                    value={newPurchase.provider}
-                    onChange={(e) => setNewPurchase({ ...newPurchase, provider: e.target.value })}
-                  />
-                  <Input
-                    label="Date de livraison souhaitée"
-                    type="date"
-                    min={today}
-                    value={newPurchase.deliveryDate}
-                    onChange={(e) => setNewPurchase({ ...newPurchase, deliveryDate: e.target.value })}
-                  />
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700">Notes / Spécifications</label>
-                    <textarea className="w-full h-24 p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]" placeholder="Précisez les détails..."></textarea>
-                  </div>
-                </div>
+                <PurchaseOrderLines lines={purchaseLines} onChange={setPurchaseLines} />
               </div>
             )}
 
@@ -1993,19 +2175,24 @@ export const ResourcesPage = () => {
 
 
 
-      {/* Employee Modal — Création uniquement, sans affectation forcée */}
+      {/* Employee Modal — Création avec affectation pour le chef de chantier */}
       <Modal
         isOpen={isEmployeeModalOpen}
-        onClose={() => { setIsEmployeeModalOpen(false); setNewEmployee({ name: '', role: 'Technicien', matricule: '', contract: 'CDI', niu: '', phone: '' }); }}
-        title="Ajouter un Collaborateur au Registre"
+        onClose={() => {
+          setIsEmployeeModalOpen(false);
+          setNewEmployee({ name: '', role: 'Technicien', matricule: '', contract: 'CDI', niu: '', phone: '', projectId: 0, weeklySalary: '' });
+        }}
+        title={role === 'Chef_chantier' ? t('resources.modals.add_worker_site') : t('resources.modals.add_collaborator_registry')}
         size="lg"
       >
         <div className="space-y-6">
-          <div className="p-4 bg-blue-50 rounded-2xl border border-blue-100">
-            <p className="text-xs font-bold text-blue-700">
-              ℹ️ L'affectation à un chantier se fait dans un second temps, depuis le registre du personnel.
-            </p>
-          </div>
+          {role !== 'Chef_chantier' && (
+            <div className="p-4 bg-blue-50 rounded-2xl border border-blue-100">
+              <p className="text-xs font-bold text-blue-700">
+                ℹ️ L'affectation à un chantier se fait dans un second temps, depuis le registre du personnel.
+              </p>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-1.5">
@@ -2033,41 +2220,6 @@ export const ResourcesPage = () => {
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-black text-slate-700 uppercase tracking-widest">Matricule</label>
-              <input
-                type="text"
-                placeholder="Auto-généré si vide"
-                value={newEmployee.matricule}
-                onChange={(e) => setNewEmployee(p => ({ ...p, matricule: e.target.value }))}
-                className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-xs font-black text-slate-700 uppercase tracking-widest">Type de Contrat</label>
-              <select
-                value={newEmployee.contract}
-                onChange={(e) => setNewEmployee(p => ({ ...p, contract: e.target.value as any }))}
-                className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-              >
-                {['CDI', 'CDD', 'Intérim', 'Prestataire', 'Stage'].map(c => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
-              </select>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-xs font-black text-slate-700 uppercase tracking-widest">NIU / CNPS</label>
-              <input
-                type="text"
-                placeholder="Numéro d'identification"
-                value={newEmployee.niu}
-                onChange={(e) => setNewEmployee(p => ({ ...p, niu: e.target.value }))}
-                className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-              />
-            </div>
-
-            <div className="space-y-1.5">
               <label className="text-xs font-black text-slate-700 uppercase tracking-widest">Téléphone</label>
               <input
                 type="text"
@@ -2077,6 +2229,73 @@ export const ResourcesPage = () => {
                 className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
               />
             </div>
+
+            {role === 'Chef_chantier' ? (
+              <>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-black text-slate-700 uppercase tracking-widest">{t('resources.hr.weekly_salary')} *</label>
+                  <input
+                    type="number"
+                    min={1}
+                    step={100}
+                    placeholder={t('resources.hr.weekly_salary_placeholder')}
+                    value={newEmployee.weeklySalary}
+                    onChange={(e) => setNewEmployee(p => ({ ...p, weeklySalary: e.target.value }))}
+                    className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)] font-bold text-emerald-800"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-black text-slate-700 uppercase tracking-widest">Chantier d'affectation *</label>
+                  <select
+                    value={newEmployee.projectId}
+                    onChange={(e) => setNewEmployee(p => ({ ...p, projectId: Number(e.target.value) }))}
+                    className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)] font-bold text-slate-700"
+                  >
+                    <option value={0}>— Sélectionner un chantier —</option>
+                    {chefProjects.map(p => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-black text-slate-700 uppercase tracking-widest">Matricule</label>
+                  <input
+                    type="text"
+                    placeholder="Auto-généré si vide"
+                    value={newEmployee.matricule}
+                    onChange={(e) => setNewEmployee(p => ({ ...p, matricule: e.target.value }))}
+                    className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-black text-slate-700 uppercase tracking-widest">Type de Contrat</label>
+                  <select
+                    value={newEmployee.contract}
+                    onChange={(e) => setNewEmployee(p => ({ ...p, contract: e.target.value as any }))}
+                    className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                  >
+                    {['CDI', 'CDD', 'Intérim', 'Prestataire', 'Stage'].map(c => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-black text-slate-700 uppercase tracking-widest">NIU / CNPS</label>
+                  <input
+                    type="text"
+                    placeholder="Numéro d'identification"
+                    value={newEmployee.niu}
+                    onChange={(e) => setNewEmployee(p => ({ ...p, niu: e.target.value }))}
+                    className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                  />
+                </div>
+              </>
+            )}
           </div>
 
           <div className="pt-6 border-t border-slate-100 flex justify-between items-center">
@@ -2091,7 +2310,15 @@ export const ResourcesPage = () => {
               <Button variant="outline" onClick={() => setIsEmployeeModalOpen(false)}>{t('common.cancel')}</Button>
               <Button
                 className="font-bold shadow-lg shadow-blue-900/20"
-                disabled={!newEmployee.name.trim() || isAddingEmployee}
+                disabled={
+                  !newEmployee.name.trim()
+                  || isAddingEmployee
+                  || (role === 'Chef_chantier' && (
+                    !newEmployee.projectId
+                    || !Number.isFinite(parseFloat(newEmployee.weeklySalary))
+                    || parseFloat(newEmployee.weeklySalary) <= 0
+                  ))
+                }
                 onClick={handleAddEmployee}
               >
                 {isAddingEmployee ? (
@@ -2109,7 +2336,7 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isServiceProviderModalOpen}
         onClose={() => setIsServiceProviderModalOpen(false)}
-        title="Nouveau Prestataire de Service"
+        title={t('resources.modals.new_service_provider')}
         size="lg"
       >
         <form onSubmit={handleServiceProviderSubmit} className="space-y-6">
@@ -2143,24 +2370,14 @@ export const ResourcesPage = () => {
                 </div>
               </div>
 
-              <div className="space-y-4">
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">Conditions Financières</label>
-                <div className="p-5 bg-blue-50/50 border-2 border-blue-100/50 rounded-3xl space-y-1.5">
-                  <label className="text-[9px] font-bold text-blue-600 uppercase ml-1">Coût total de la prestation (HT)</label>
-                  <div className="relative">
-                    <Input
-                      type="number"
-                      placeholder="0.00"
-                      value={newServiceProvider.totalCost}
-                      onChange={(e) => setNewServiceProvider({ ...newServiceProvider, totalCost: e.target.value })}
-                      className="h-14 pl-5 pr-14 rounded-2xl border-blue-200 bg-white font-black text-xl text-blue-700 focus:ring-4 focus:ring-blue-100 transition-all"
-                    />
-                    <div className="absolute right-5 top-1/2 -translate-y-1/2 font-black text-blue-300 text-sm">FCFA</div>
-                  </div>
-                  <p className="text-[10px] text-blue-500/70 font-medium ml-1 flex items-center gap-1">
-                    <AlertCircle className="w-3 h-3" /> Ce montant sera facturé pour l'ensemble des tâches.
-                  </p>
-                </div>
+              <div className="p-5 bg-blue-50/50 border-2 border-blue-100/50 rounded-3xl">
+                <p className="text-[9px] font-bold text-blue-600 uppercase">Total estimé du contrat</p>
+                <p className="text-2xl font-black text-blue-700 mt-1">
+                  {sumTaskCosts(newServiceProvider.tasks).toLocaleString('fr-FR')} FCFA
+                </p>
+                <p className="text-[10px] text-blue-500/70 font-medium mt-1">
+                  Somme des montants attribués à chaque tâche.
+                </p>
               </div>
             </div>
 
@@ -2171,33 +2388,67 @@ export const ResourcesPage = () => {
                   type="button"
                   size="sm"
                   variant="ghost"
-                  onClick={() => setNewServiceProvider({
-                    ...newServiceProvider,
-                    tasks: [...newServiceProvider.tasks, '']
-                  })}
+                  onClick={() => {
+                    if (!newProviderTaskTitle.trim()) return;
+                    setNewServiceProvider({
+                      ...newServiceProvider,
+                      tasks: [
+                        ...newServiceProvider.tasks,
+                        { title: newProviderTaskTitle.trim(), cost: newProviderTaskCost || '0' },
+                      ],
+                    });
+                    setNewProviderTaskTitle('');
+                    setNewProviderTaskCost('');
+                  }}
                   className="h-8 px-3 text-[10px] uppercase font-black text-blue-600 hover:bg-blue-50 rounded-lg"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5" /> Ajouter une tâche
                 </Button>
               </div>
 
-              <div className="p-5 bg-slate-50 border-2 border-slate-100 rounded-3xl space-y-3 min-h-[320px] max-h-[400px] overflow-y-auto">
+              <div className="flex gap-2 mb-2">
+                <Input
+                  placeholder="Intitulé de la tâche"
+                  value={newProviderTaskTitle}
+                  onChange={(e) => setNewProviderTaskTitle(e.target.value)}
+                  className="flex-1 h-11 text-xs font-bold"
+                />
+                <Input
+                  type="number"
+                  placeholder="Montant FCFA"
+                  value={newProviderTaskCost}
+                  onChange={(e) => setNewProviderTaskCost(e.target.value)}
+                  className="w-36 h-11 text-xs font-bold"
+                  min="0"
+                />
+              </div>
+
+              <div className="p-5 bg-slate-50 border-2 border-slate-100 rounded-3xl space-y-3 min-h-[280px] max-h-[400px] overflow-y-auto">
                 {newServiceProvider.tasks.map((task, idx) => (
                   <div key={idx} className="flex gap-2 group animate-in slide-in-from-right-2 duration-200">
-                    <div className="flex-1 relative">
+                    <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <Input
                         placeholder={`Tâche #${idx + 1}`}
-                        value={task}
+                        value={task.title}
                         onChange={(e) => {
                           const updated = [...newServiceProvider.tasks];
-                          updated[idx] = e.target.value;
+                          updated[idx] = { ...updated[idx], title: e.target.value };
                           setNewServiceProvider({ ...newServiceProvider, tasks: updated });
                         }}
-                        className="h-11 pl-4 pr-10 rounded-xl border-slate-200 bg-white font-bold text-xs focus:border-blue-500 transition-all"
+                        className="h-11 rounded-xl border-slate-200 bg-white font-bold text-xs"
                       />
-                      <div className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 bg-slate-100 rounded-md flex items-center justify-center text-[10px] font-black text-slate-400">
-                        {idx + 1}
-                      </div>
+                      <Input
+                        type="number"
+                        placeholder="Montant FCFA"
+                        value={task.cost}
+                        onChange={(e) => {
+                          const updated = [...newServiceProvider.tasks];
+                          updated[idx] = { ...updated[idx], cost: e.target.value };
+                          setNewServiceProvider({ ...newServiceProvider, tasks: updated });
+                        }}
+                        className="h-11 rounded-xl border-slate-200 bg-white font-bold text-xs"
+                        min="0"
+                      />
                     </div>
                     <Button
                       type="button"
@@ -2207,7 +2458,7 @@ export const ResourcesPage = () => {
                         const updated = newServiceProvider.tasks.filter((_, i) => i !== idx);
                         setNewServiceProvider({ ...newServiceProvider, tasks: updated });
                       }}
-                      className="h-11 w-11 p-0 rounded-xl text-red-300 hover:text-red-500 hover:bg-red-50 transition-all"
+                      className="h-11 w-11 p-0 rounded-xl text-red-300 hover:text-red-500 hover:bg-red-50"
                     >
                       <Trash2 className="w-4 h-4" />
                     </Button>
@@ -2260,95 +2511,74 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isEquipmentModalOpen}
         onClose={() => setIsEquipmentModalOpen(false)}
-        title="Demander un Engin pour un Chantier"
+        title={t('resources.modals.request_equipment')}
         size="lg"
       >
         <div className="space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="space-y-4">
-              <h4 className="text-sm font-black text-slate-900 uppercase tracking-tight">1. Sélectionner l'Engin</h4>
-              <div className="grid grid-cols-1 gap-3">
-                {availableEquipment.map((item) => {
-                  const existingCount = equipmentList.filter(e => e.name === item.name).length;
-                  const inServiceCount = equipmentList.filter(e => e.name === item.name && e.status === 'En service').length;
-
-                  return (
-                    <button
-                      key={item.name}
-                      disabled={inServiceCount === 0}
-                      onClick={() => setNewEquipment({ ...newEquipment, name: item.name, type: item.type })}
-                      className={cn(
-                        "flex items-center justify-between p-4 rounded-2xl border-2 transition-all text-left",
-                        newEquipment.name === item.name ? "border-[var(--color-primary)] bg-blue-50" : "border-slate-100 hover:border-slate-200",
-                        inServiceCount === 0 && "opacity-50 cursor-not-allowed grayscale"
-                      )}
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="p-2 bg-white rounded-xl shadow-sm">
-                          <Truck className="w-5 h-5 text-slate-600" />
-                        </div>
-                        <div>
-                          <p className="text-sm font-black text-slate-900">{item.name}</p>
-                          <p className="text-[10px] font-bold text-slate-400 uppercase">{item.type}</p>
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-[10px] font-black text-slate-400 uppercase">Disponibilité</p>
-                        <p className={cn("text-xs font-bold", inServiceCount > 0 ? "text-emerald-600" : "text-red-600")}>
-                          {inServiceCount} / {existingCount || 1} dispos
-                        </p>
-                      </div>
-                    </button>
-                  );
-                })}
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="text-sm font-bold text-slate-700">{t('resources.equipment.request_form.need_label')}</label>
+              <textarea
+                className="w-full min-h-[100px] px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)] resize-y"
+                value={equipmentRequestForm.needDescription}
+                onChange={(e) => setEquipmentRequestForm({ ...equipmentRequestForm, needDescription: e.target.value })}
+                placeholder={t('resources.equipment.request_form.need_placeholder')}
+              />
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <label className="text-sm font-bold text-slate-700">{t('resources.equipment.request_form.date_label')}</label>
+                <Input
+                  type="date"
+                  min={today}
+                  value={equipmentRequestForm.desiredDate}
+                  onChange={(e) => setEquipmentRequestForm({ ...equipmentRequestForm, desiredDate: e.target.value })}
+                  className="h-12"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-sm font-bold text-slate-700">{t('resources.equipment.request_form.project_label')}</label>
+                <select
+                  className="w-full h-12 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                  value={equipmentRequestForm.projectId}
+                  onChange={(e) => setEquipmentRequestForm({ ...equipmentRequestForm, projectId: Number(e.target.value) })}
+                >
+                  {(role === 'Chef_chantier' ? chefProjects : projects).map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
               </div>
             </div>
-
-            <div className="space-y-6">
-              <h4 className="text-sm font-black text-slate-900 uppercase tracking-tight">2. Détails de la Demande</h4>
-              <div className="space-y-4">
-                <div className="space-y-1.5">
-                  <label className="text-sm font-bold text-slate-700">Chantier Demandeur</label>
-                  <select
-                    className="w-full h-12 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                    value={newEquipment.location}
-                    onChange={(e) => setNewEquipment({ ...newEquipment, location: e.target.value })}
-                  >
-                    {projects.map(p => (
-                      <option key={p.id} value={p.id}>{p.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="p-4 bg-blue-50 rounded-2xl border border-blue-100">
-                  <div className="flex items-center gap-3 text-blue-700 mb-2">
-                    <AlertCircle className="w-4 h-4" />
-                    <span className="text-xs font-bold">Information</span>
-                  </div>
-                  <p className="text-[11px] text-blue-600 leading-relaxed">
-                    La demande sera envoyée au responsable logistique. Le statut par défaut sera <span className="font-black">"En cours"</span>.
-                  </p>
-                </div>
+            <div className="p-4 bg-amber-50 rounded-2xl border border-amber-100">
+              <div className="flex items-center gap-3 text-amber-800 mb-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span className="text-xs font-bold">{t('resources.equipment.request_status.pending')}</span>
               </div>
+              <p className="text-[11px] text-amber-700 leading-relaxed">
+                {t('resources.equipment.request_form.pending_info')}
+              </p>
             </div>
           </div>
 
           <div className="pt-6 border-t border-slate-100 flex justify-end gap-3">
             <Button variant="outline" onClick={() => setIsEquipmentModalOpen(false)}>{t('common.cancel')}</Button>
             <Button
-              disabled={!newEquipment.name || isSubmittingEquipment}
-              onClick={() => {
-                const item = availableEquipment.find(e => e.name === newEquipment.name);
-                if (item) handleAddEquipment(item, newEquipment.location);
-              }}
+              disabled={
+                equipmentRequestForm.needDescription.trim().length < 10 ||
+                !equipmentRequestForm.desiredDate ||
+                !equipmentRequestForm.projectId ||
+                isSubmittingEquipment
+              }
+              onClick={handleSubmitEquipmentRequest}
               className="px-8 font-bold shadow-lg shadow-blue-900/20"
             >
               {isSubmittingEquipment ? (
                 <>
                   <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                  Traitement...
+                  {t('common.processing', { defaultValue: 'Traitement...' })}
                 </>
               ) : (
-                "Envoyer la Demande"
+                t('resources.equipment.request_form.submit')
               )}
             </Button>
           </div>
@@ -2359,7 +2589,7 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isAssignModalOpen}
         onClose={() => setIsAssignModalOpen(false)}
-        title="Affectation d'Engin"
+        title={t('resources.modals.assign_equipment')}
         size="md"
       >
         <div className="space-y-6">
@@ -2402,7 +2632,7 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isStockMovementModalOpen}
         onClose={() => setIsStockMovementModalOpen(false)}
-        title="Nouveau Mouvement de Stock"
+        title={t('resources.modals.stock_movement')}
         size="lg"
       >
         <div className="space-y-8">
@@ -2503,18 +2733,26 @@ export const ResourcesPage = () => {
                     <div className="space-y-1.5">
                       <label className="text-sm font-bold text-slate-700">Article</label>
                       <select
-                        value={newStockMovement.item}
+                        value={newStockMovement.materialId ?? ''}
                         onChange={(e) => {
-                          const item = e.target.value;
+                          const id = Number(e.target.value);
+                          const mat = movementMaterials.find((m) => m.id === id);
                           setNewStockMovement({
                             ...newStockMovement,
-                            item,
-                            unit: ITEM_UNITS[item] || 'Unités'
+                            materialId: id || undefined,
+                            item: mat?.name || '',
+                            unit: mat?.unit || '',
                           });
                         }}
                         className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                        required
                       >
-                        {Object.keys(ITEM_UNITS).map(item => <option key={item} value={item}>{item}</option>)}
+                        <option value="">{t('resources.stock.select_material')}</option>
+                        {movementMaterials.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.name} ({m.unit})
+                          </option>
+                        ))}
                       </select>
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -2646,7 +2884,7 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isAssignModalOpen}
         onClose={() => setIsAssignModalOpen(false)}
-        title={`Affecter l'Engin: ${assigningEquipment?.name}`}
+        title={t('resources.modals.assign_equipment_named', { name: assigningEquipment?.name })}
       >
         <form className="space-y-6" onSubmit={(e) => { e.preventDefault(); setIsAssignModalOpen(false); }}>
           <div className="p-4 bg-blue-50 rounded-2xl border border-blue-100 mb-6">
@@ -2683,7 +2921,7 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isAssignEmployeeModalOpen}
         onClose={() => setIsAssignEmployeeModalOpen(false)}
-        title={`Affecter ${selectedResource?.name}`}
+        title={t('resources.modals.assign_resource', { name: selectedResource?.name })}
       >
         <div className="space-y-6">
           <div className="flex items-center gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100">
@@ -2710,9 +2948,9 @@ export const ResourcesPage = () => {
               defaultValue=""
               className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
             >
-              <option value="" disabled>— Sélectionner un chantier —</option>
-              {projects.map(p => (
-                <option key={p.id} value={p.id}>{p.name} ({p.status})</option>
+              <option key="assign-project-placeholder" value="" disabled>— Sélectionner un chantier —</option>
+              {projects.map((p, i) => (
+                <option key={p.id != null && p.id !== '' ? p.id : `project-${i}`} value={p.id}>{p.name} ({p.status})</option>
               ))}
             </select>
           </div>
@@ -2758,7 +2996,7 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isConfirmUnassignModalOpen}
         onClose={() => { setIsConfirmUnassignModalOpen(false); setEmployeeToUnassign(null); }}
-        title="Retirer du Chantier"
+        title={t('resources.modals.remove_from_site')}
       >
         <div className="space-y-6">
           <div className="flex items-center gap-4 p-4 bg-amber-50 rounded-2xl border border-amber-100">
@@ -2787,7 +3025,7 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isConfirmDeleteModalOpen}
         onClose={() => setIsConfirmDeleteModalOpen(false)}
-        title="Supprimer du Registre"
+        title={t('resources.modals.delete_from_registry')}
       >
         <div className="space-y-6">
           <div className="flex items-center gap-4 p-4 bg-red-50 rounded-2xl border border-red-100">
@@ -2816,7 +3054,7 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isLogbookModalOpen}
         onClose={() => setIsLogbookModalOpen(false)}
-        title="Carnet de Bord Engin"
+        title={t('resources.modals.equipment_logbook')}
         size="lg"
       >
         <div className="space-y-8">
@@ -2889,7 +3127,7 @@ export const ResourcesPage = () => {
           setNewLotName('');
           setNewLotTask({});
         }}
-        title={editingContract ? "Modifier le Contrat ST" : "Nouveau Contrat de Sous-traitance"}
+        title={editingContract ? t('resources.modals.edit_subcontract') : t('resources.modals.new_subcontract')}
         size="lg"
       >
         <form className="space-y-6" onSubmit={handleSubcontractSubmit}>
@@ -2932,14 +3170,13 @@ export const ResourcesPage = () => {
                 value={newSubcontract.task}
                 onChange={(e) => setNewSubcontract({ ...newSubcontract, task: e.target.value })}
               />
-              <Input
-                label="Montant du Contrat (FCFA)"
-                type="number" min="0"
-                placeholder="0"
-                required
-                value={newSubcontract.amount}
-                onChange={(e) => setNewSubcontract({ ...newSubcontract, amount: e.target.value })}
-              />
+              <div className="space-y-1.5">
+                <label className="text-sm font-bold text-slate-700">Montant du contrat (FCFA)</label>
+                <div className="h-11 px-4 flex items-center bg-slate-50 border border-slate-200 rounded-xl text-sm font-black text-slate-900">
+                  {sumTaskCosts(buildTasksPayload()).toLocaleString('fr-FR')}
+                </div>
+                <p className="text-[10px] text-slate-400 font-medium">Calculé automatiquement à partir des montants des tâches.</p>
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <Input
                   label="Date Début"
@@ -2975,20 +3212,42 @@ export const ResourcesPage = () => {
                       <input
                         type="text"
                         value={newSubcontractTask}
-                        onChange={e => setNewSubcontractTask(e.target.value)}
-                        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); if (newSubcontractTask.trim()) { setNewSubcontract({ ...newSubcontract, tasks: [...newSubcontract.tasks, newSubcontractTask.trim()] }); setNewSubcontractTask(''); } } }}
-                        placeholder="Ajouter une tâche..."
+                        onChange={(e) => setNewSubcontractTask(e.target.value)}
+                        placeholder="Intitulé de la tâche..."
                         className="flex-1 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-[var(--color-primary)] outline-none bg-slate-50"
                       />
-                      <button type="button" onClick={() => { if (newSubcontractTask.trim()) { setNewSubcontract({ ...newSubcontract, tasks: [...newSubcontract.tasks, newSubcontractTask.trim()] }); setNewSubcontractTask(''); } }}
-                        className="px-3 py-2 bg-[var(--color-primary)] text-white rounded-xl hover:opacity-90">
+                      <input
+                        type="number"
+                        value={newSubcontractTaskCost}
+                        onChange={(e) => setNewSubcontractTaskCost(e.target.value)}
+                        placeholder="Montant"
+                        min="0"
+                        className="w-28 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-[var(--color-primary)] outline-none bg-slate-50"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!newSubcontractTask.trim()) return;
+                          setNewSubcontract({
+                            ...newSubcontract,
+                            tasks: [
+                              ...newSubcontract.tasks,
+                              { title: newSubcontractTask.trim(), cost: newSubcontractTaskCost || '0' },
+                            ],
+                          });
+                          setNewSubcontractTask('');
+                          setNewSubcontractTaskCost('');
+                        }}
+                        className="px-3 py-2 bg-[var(--color-primary)] text-white rounded-xl hover:opacity-90"
+                      >
                         <Plus className="w-4 h-4" />
                       </button>
                     </div>
                     <div className="space-y-1 max-h-36 overflow-y-auto">
                       {newSubcontract.tasks.map((task, i) => (
-                        <div key={i} className="flex items-center justify-between px-3 py-1.5 bg-slate-50 rounded-lg">
-                          <span className="text-sm text-slate-700">{task}</span>
+                        <div key={i} className="flex items-center justify-between gap-2 px-3 py-1.5 bg-slate-50 rounded-lg">
+                          <span className="text-sm text-slate-700 flex-1">{task.title}</span>
+                          <span className="text-xs font-black text-slate-900">{Number(task.cost || 0).toLocaleString()} FCFA</span>
                           <button type="button" onClick={() => setNewSubcontract({ ...newSubcontract, tasks: newSubcontract.tasks.filter((_, j) => j !== i) })} className="text-red-400 hover:text-red-600 p-0.5"><Trash2 className="w-3 h-3" /></button>
                         </div>
                       ))}
@@ -3009,16 +3268,29 @@ export const ResourcesPage = () => {
                         </div>
                         <div className="p-3 space-y-2">
                           {lot.tasks.map((task, taskIdx) => (
-                            <div key={taskIdx} className="flex items-center justify-between px-3 py-1.5 bg-white rounded-lg border border-slate-100">
-                              <span className="text-xs text-slate-700">{task}</span>
+                            <div key={taskIdx} className="flex items-center justify-between gap-2 px-3 py-1.5 bg-white rounded-lg border border-slate-100">
+                              <span className="text-xs text-slate-700 flex-1">{task.title}</span>
+                              <span className="text-[10px] font-black text-slate-900">{Number(task.cost || 0).toLocaleString()} FCFA</span>
                               <button type="button" onClick={() => removeTaskFromLot(lotIdx, taskIdx)} className="text-red-400 hover:text-red-600"><Trash2 className="w-3 h-3" /></button>
                             </div>
                           ))}
                           <div className="flex gap-2">
-                            <input type="text" value={newLotTask[lotIdx] || ''} placeholder="Nouvelle tâche dans ce lot..."
-                              onChange={e => setNewLotTask(prev => ({ ...prev, [lotIdx]: e.target.value }))}
-                              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addTaskToLot(lotIdx); } }}
-                              className="flex-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-1 focus:ring-[var(--color-primary)] outline-none bg-slate-50" />
+                            <input
+                              type="text"
+                              value={newLotTask[lotIdx] || ''}
+                              placeholder="Tâche..."
+                              onChange={(e) => setNewLotTask((prev) => ({ ...prev, [lotIdx]: e.target.value }))}
+                              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addTaskToLot(lotIdx); } }}
+                              className="flex-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs outline-none bg-slate-50"
+                            />
+                            <input
+                              type="number"
+                              value={newLotTaskCost[lotIdx] || ''}
+                              placeholder="FCFA"
+                              min="0"
+                              onChange={(e) => setNewLotTaskCost((prev) => ({ ...prev, [lotIdx]: e.target.value }))}
+                              className="w-24 border border-slate-200 rounded-lg px-2 py-1.5 text-xs outline-none bg-slate-50"
+                            />
                             <button type="button" onClick={() => addTaskToLot(lotIdx)}
                               className="px-2 py-1.5 bg-slate-700 text-white rounded-lg text-xs hover:bg-slate-800">+</button>
                           </div>
@@ -3079,7 +3351,7 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isAllOrdersModalOpen}
         onClose={() => setIsAllOrdersModalOpen(false)}
-        title="Toutes les Commandes"
+        title={t('resources.modals.all_orders')}
         size="lg"
       >
         <div className="space-y-6">
@@ -3161,7 +3433,7 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isContractDetailsModalOpen}
         onClose={() => setIsContractDetailsModalOpen(false)}
-        title="Détails du Contrat Sous-traitant"
+        title={t('resources.modals.subcontract_details')}
       >
         {selectedContract && (
           <div className="space-y-6">
@@ -3174,15 +3446,24 @@ export const ResourcesPage = () => {
                 <span className="bg-emerald-100 text-emerald-700 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest">
                   Actif
                 </span>
-                <span className={cn(
-                  "px-3 py-1 text-[9px] font-black uppercase tracking-widest rounded-full border flex items-center gap-1.5 w-fit",
-                  selectedContract.paymentStatus === 'Payé'
-                    ? "bg-emerald-50 text-emerald-600 border-emerald-100"
-                    : "bg-amber-50 text-amber-600 border-amber-100"
-                )}>
-                  <span className={cn("w-1.5 h-1.5 rounded-full", selectedContract.paymentStatus === 'Payé' ? "bg-emerald-500" : "bg-amber-500")} />
-                  {selectedContract.paymentStatus || 'En attente'}
-                </span>
+                {shouldShowPaymentStatus(selectedContract) && getPaymentStatusLabel(selectedContract) && (
+                  <span
+                    className={cn(
+                      'px-3 py-1 text-[9px] font-black uppercase tracking-widest rounded-full border flex items-center gap-1.5 w-fit',
+                      getPaymentStatusLabel(selectedContract) === 'Payé'
+                        ? 'bg-emerald-50 text-emerald-600 border-emerald-100'
+                        : 'bg-amber-50 text-amber-600 border-amber-100',
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'w-1.5 h-1.5 rounded-full',
+                        getPaymentStatusLabel(selectedContract) === 'Payé' ? 'bg-emerald-500' : 'bg-amber-500',
+                      )}
+                    />
+                    {getPaymentStatusLabel(selectedContract)}
+                  </span>
+                )}
               </div>
             </div>
 
@@ -3246,16 +3527,24 @@ export const ResourcesPage = () => {
                               <span className="text-xs font-bold text-[var(--color-primary)]">{doneCount}/{lot.tasks.length} — {lotPct}%</span>
                             </div>
                             <div className="p-2 space-y-1">
-                              {lot.tasks.map((task: any) => (
-                                <div key={task.id}
-                                  onClick={() => toggleSubcontractTask(selectedContract.id, task.id)}
-                                  className={cn("flex items-center gap-3 px-3 py-2 rounded-lg border transition-all cursor-pointer",
-                                    task.completed ? "bg-emerald-50 border-emerald-100" : "bg-white border-slate-100 hover:border-[var(--color-primary)]")}>
-                                  <div className={cn("w-4 h-4 rounded border flex items-center justify-center shrink-0",
-                                    task.completed ? "bg-emerald-500 border-emerald-500 text-white" : "border-slate-300 bg-white")}>
+                              {lot.tasks.map((task: any, taskIdx: number) => (
+                                <div
+                                  key={task.id != null && task.id !== '' ? task.id : `sub-task-${lotNum}-${taskIdx}`}
+                                  onClick={() => !task.paid && toggleSubcontractTask(selectedContract.id, task.id)}
+                                  className={cn(
+                                    'flex items-center gap-3 px-3 py-2 rounded-lg border transition-all',
+                                    task.paid ? 'bg-slate-50 border-slate-100 opacity-70 cursor-not-allowed' :
+                                      task.completed ? 'bg-emerald-50 border-emerald-100 cursor-pointer' :
+                                        'bg-white border-slate-100 hover:border-[var(--color-primary)] cursor-pointer',
+                                  )}
+                                >
+                                  <div className={cn('w-4 h-4 rounded border flex items-center justify-center shrink-0',
+                                    task.completed ? 'bg-emerald-500 border-emerald-500 text-white' : 'border-slate-300 bg-white')}>
                                     {task.completed && <ClipboardCheck className="w-2.5 h-2.5" />}
                                   </div>
-                                  <span className={cn("text-sm", task.completed ? "line-through text-slate-400" : "text-slate-700")}>{task.title}</span>
+                                  <span className={cn('text-sm flex-1', task.completed ? 'line-through text-slate-400' : 'text-slate-700')}>{task.title}</span>
+                                  <span className="text-xs font-black text-slate-900">{Number(task.cost || 0).toLocaleString()} FCFA</span>
+                                  {task.paid && <span className="text-[9px] font-black uppercase text-emerald-600">Payé</span>}
                                 </div>
                               ))}
                             </div>
@@ -3268,16 +3557,24 @@ export const ResourcesPage = () => {
                 // Mode liste simple
                 return (
                   <div className="space-y-1.5">
-                    {tasks.map((task: any) => (
-                      <div key={task.id}
-                        onClick={() => toggleSubcontractTask(selectedContract.id, task.id)}
-                        className={cn("flex items-center gap-3 px-3 py-2.5 rounded-xl border transition-all cursor-pointer",
-                          task.completed ? "bg-emerald-50 border-emerald-100" : "bg-white border-slate-100 hover:border-[var(--color-primary)]")}>
-                        <div className={cn("w-5 h-5 rounded-md border flex items-center justify-center shrink-0",
-                          task.completed ? "bg-emerald-500 border-emerald-500 text-white" : "border-slate-300 bg-white")}>
+                    {tasks.map((task: any, taskIdx: number) => (
+                      <div
+                        key={task.id != null && task.id !== '' ? task.id : `sub-task-${taskIdx}`}
+                        onClick={() => !task.paid && toggleSubcontractTask(selectedContract.id, task.id)}
+                        className={cn(
+                          'flex items-center gap-3 px-3 py-2.5 rounded-xl border transition-all',
+                          task.paid ? 'bg-slate-50 border-slate-100 opacity-70 cursor-not-allowed' :
+                            task.completed ? 'bg-emerald-50 border-emerald-100 cursor-pointer' :
+                              'bg-white border-slate-100 hover:border-[var(--color-primary)] cursor-pointer',
+                        )}
+                      >
+                        <div className={cn('w-5 h-5 rounded-md border flex items-center justify-center shrink-0',
+                          task.completed ? 'bg-emerald-500 border-emerald-500 text-white' : 'border-slate-300 bg-white')}>
                           {task.completed && <ClipboardCheck className="w-3.5 h-3.5" />}
                         </div>
-                        <span className={cn("text-sm font-medium", task.completed ? "line-through text-slate-400" : "text-slate-700")}>{task.title}</span>
+                        <span className={cn('text-sm font-medium flex-1', task.completed ? 'line-through text-slate-400' : 'text-slate-700')}>{task.title}</span>
+                        <span className="text-xs font-black text-slate-900">{Number(task.cost || 0).toLocaleString()} FCFA</span>
+                        {task.paid && <span className="text-[9px] font-black uppercase text-emerald-600">Payé</span>}
                       </div>
                     ))}
                   </div>
@@ -3285,19 +3582,32 @@ export const ResourcesPage = () => {
               })()}
             </div>
 
-            <div className="pt-6 border-t border-slate-100 flex justify-end gap-3">
-              {selectedContract.progress === 100 && selectedContract.paymentStatus !== 'Payé' && (
-                <Button 
-                  onClick={() => {
-                    handlePayProvider(selectedContract);
-                    setIsContractDetailsModalOpen(false);
-                  }}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl"
-                >
-                  <CheckCircle2 className="w-4 h-4 mr-2" /> Valider Paiement
-                </Button>
-              )}
-              <Button variant="outline" onClick={() => setIsContractDetailsModalOpen(false)}>{t('common.close')}</Button>
+            <div className="pt-6 border-t border-slate-100 flex flex-wrap justify-between items-center gap-3">
+              <div className="text-xs font-bold text-slate-500">
+                {hasPayableTasks(selectedContract) && (
+                  <span className="text-amber-600">
+                    À payer (tâches terminées) : {formatFcfa(getPayableAmount(selectedContract))}
+                  </span>
+                )}
+                {getPaidAmount(selectedContract) > 0 && (
+                  <span className="block text-emerald-600 mt-0.5">
+                    Déjà payé : {formatFcfa(getPaidAmount(selectedContract))}
+                  </span>
+                )}
+              </div>
+              <div className="flex gap-3">
+                {hasPayableTasks(selectedContract) && (
+                  <Button
+                    onClick={() => handlePayProvider(selectedContract)}
+                    disabled={isPayingProvider}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl"
+                  >
+                    <CheckCircle2 className="w-4 h-4 mr-2" />
+                    Payer {formatFcfa(getPayableAmount(selectedContract))}
+                  </Button>
+                )}
+                <Button variant="outline" onClick={() => setIsContractDetailsModalOpen(false)}>{t('common.close')}</Button>
+              </div>
             </div>
           </div>
         )}
@@ -3307,7 +3617,7 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isManageContractModalOpen}
         onClose={() => setIsManageContractModalOpen(false)}
-        title="Gestion du Contrat Employé"
+        title={t('resources.modals.manage_employee_contract')}
       >
         {selectedResource && (
           <div className="space-y-6">
@@ -3431,7 +3741,7 @@ export const ResourcesPage = () => {
                     "text-sm font-black",
                     log.type === 'Sortie' ? "text-red-600" : "text-emerald-600"
                   )}>
-                    {log.type === 'Sortie' ? '-' : '+'}{log.qty} {log.unit}
+                    {log.type === 'Sortie' ? '-' : '+'}{formatQuantityWithUnit(log.qty, log.unit)}
                   </p>
                   <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-1">{log.project}</p>
                 </div>
@@ -3468,7 +3778,7 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isInventoryModalOpen}
         onClose={() => setIsInventoryModalOpen(false)}
-        title="Inventaire Physique"
+        title={t('resources.modals.physical_inventory')}
         size="lg"
       >
         <div className="space-y-6">
@@ -3596,116 +3906,12 @@ export const ResourcesPage = () => {
       {/* === TAB POINTAGE === */}
       {/* === TAB POINTAGE (Historique) === */}
       {activeTab === 'pointage' && (
-        <div className="space-y-6">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-            <div>
-              <h3 className="text-xl font-black text-slate-900 tracking-tight">Historique des Présences</h3>
-              <p className="text-xs text-slate-400 font-bold uppercase tracking-widest mt-1">
-                {role === 'Technicien_chantier' ? "Mon journal de présence individuel" : "Suivi des présences par chantier"}
-              </p>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-3">
-              {role !== 'Technicien_chantier' && (
-                <div className="flex items-center gap-2">
-                  <Filter className="w-3 h-3 text-slate-400" />
-                  <select
-                    value={attendanceProjectId}
-                    onChange={(e) => setAttendanceProjectId(Number(e.target.value))}
-                    className="text-[10px] font-bold text-slate-500 uppercase tracking-widest bg-transparent outline-none cursor-pointer hover:text-[var(--color-primary)] transition-colors"
-                  >
-                    <option value={0}>— Sélectionner un chantier —</option>
-                    {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                  </select>
-                </div>
-              )}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={loadAttendance}
-                className="font-bold"
-              >
-                <History className="w-4 h-4 mr-2" /> Actualiser
-              </Button>
-            </div>
-          </div>
-
-          <Card className="border-none shadow-xl shadow-slate-200/50 overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-slate-50 border-b border-slate-100">
-                  <tr className="text-left text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">
-                    <th className="px-6 py-4">Date</th>
-                    {role !== 'Technicien_chantier' && <th className="px-6 py-4">Employé</th>}
-                    <th className="px-6 py-4">Statut</th>
-                    <th className="px-6 py-4">Arrivée</th>
-                    <th className="px-6 py-4">Départ</th>
-                    <th className="px-6 py-4">Retard</th>
-                    <th className="px-6 py-4">Chantier</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-50">
-                  {isLoadingAttendance ? (
-                    <tr>
-                      <td colSpan={7} className="px-6 py-12 text-center">
-                        <div className="animate-spin h-6 w-6 border-2 border-[var(--color-primary)] border-t-transparent rounded-full mx-auto" />
-                      </td>
-                    </tr>
-                  ) : attendanceHistory.length === 0 ? (
-                    <tr>
-                      <td colSpan={7} className="px-6 py-12 text-center text-slate-400 font-bold">
-                        Choisissez un chantier
-                      </td>
-                    </tr>
-                  ) : (
-                    attendanceHistory
-                      .filter(rec => {
-                        if (role === 'Technicien_chantier') {
-                          const me = employees.find(e => e.matricule === profile?.matricule) ||
-                            employees.find(e => e.name === profile?.name);
-                          return String(rec.employeeId) === String(me?.id);
-                        }
-                        return true;
-                      })
-                      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-                      .map((rec: any) => (
-                        <tr key={rec.id} className="hover:bg-slate-50/80 transition-colors">
-                          <td className="px-6 py-4 text-xs font-black text-slate-900">
-                            {new Date(rec.date).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })}
-                          </td>
-                          {role !== 'Technicien_chantier' && (
-                            <td className="px-6 py-4">
-                              <p className="text-xs font-bold text-slate-900">{rec.employee?.name || `ID: ${rec.employeeId}`}</p>
-                            </td>
-                          )}
-                          <td className="px-6 py-4">
-                            <span className={cn(
-                              "text-[10px] font-black uppercase tracking-widest px-2 py-1 rounded-md",
-                              rec.status === 'Présent' ? "bg-emerald-100 text-emerald-700" :
-                                rec.status === 'Retard' ? "bg-amber-100 text-amber-700" :
-                                  "bg-red-100 text-red-700"
-                            )}>
-                              {rec.status}
-                            </span>
-                          </td>
-                          <td className="px-6 py-4 text-xs font-mono font-bold text-slate-600">{rec.arrivalTime || '—'}</td>
-                          <td className="px-6 py-4 text-xs font-mono font-bold text-slate-600">{rec.departureTime || '—'}</td>
-                          <td className="px-6 py-4 text-xs">
-                            {rec.lateMinutes > 0 ? (
-                              <span className="font-bold text-amber-600">+{rec.lateMinutes} min</span>
-                            ) : <span className="text-slate-300">—</span>}
-                          </td>
-                          <td className="px-6 py-4 text-xs font-bold text-slate-400">
-                            {getProjectNameById(rec.projectId)}
-                          </td>
-                        </tr>
-                      ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </Card>
-        </div>
+        <AttendancePanel
+          role={role as any}
+          projects={projects}
+          employees={employees}
+          chefProjectIds={chefProjectIds}
+        />
       )}
 
       {/* === ONGLET POINTAGE === */}
@@ -3713,7 +3919,7 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isUnassignedModalOpen}
         onClose={() => setIsUnassignedModalOpen(false)}
-        title="Affecter du Personnel au Chantier"
+        title={t('resources.modals.assign_personnel')}
         maxWidth="2xl"
       >
         <div className="space-y-6">
@@ -3769,7 +3975,7 @@ export const ResourcesPage = () => {
       <Modal
         isOpen={isEmployeeDetailModalOpen}
         onClose={() => setIsEmployeeDetailModalOpen(false)}
-        title="Fiche Individuelle du Collaborateur"
+        title={t('resources.modals.employee_profile')}
         maxWidth="lg"
       >
         {selectedEmployeeForDetail && (
@@ -3803,7 +4009,7 @@ export const ResourcesPage = () => {
               </div>
               <div>
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Affectation Actuelle</p>
-                <p className="text-sm font-bold text-emerald-600 bg-emerald-50 inline-block px-2 py-0.5 rounded">{getProjectNameById(selectedEmployeeForDetail.projectId)}</p>
+                <p className="text-sm font-bold text-emerald-600 bg-emerald-50 inline-block px-2 py-0.5 rounded">{getEmployeeProjectLabel(selectedEmployeeForDetail.projectId)}</p>
               </div>
               <div>
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Service / Département</p>

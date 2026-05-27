@@ -1,4 +1,6 @@
-import React, { createContext, useContext, useEffect, useMemo, useState, ReactNode } from 'react';
+import React, {
+  createContext, useContext, useEffect, useMemo, useState, useCallback, ReactNode,
+} from 'react';
 import {
   Project, Transaction, Incident, Audit, Employee, Equipment,
   StockMovement, Purchase, Subcontract, Checklist, DailyReport,
@@ -18,6 +20,8 @@ import { checklistService } from '../services/checklist.service';
 import { dailyReportService } from '../services/dailyReport.service';
 import { documentService } from '../services/document.service';
 import { ticketService } from '../services/ticket.service';
+import { getIncidentImagesFromRecord } from '../lib/incidentImages';
+import { fixIntegrationImageUrl } from '../lib/integrationConfig';
 import { employeeRHService } from '../services/employeeRH.service';
 
 interface DataContextType {
@@ -33,6 +37,7 @@ interface DataContextType {
   incidents: Incident[];
   addIncident: (incident: Partial<Incident>) => Promise<void> | void;
   updateIncident: (id: number, updates: Partial<Incident>) => Promise<void> | void;
+  refreshIncidents: () => Promise<void>;
 
   audits: Audit[];
   addAudit: (audit: Partial<Audit>) => Promise<void> | void;
@@ -59,11 +64,14 @@ interface DataContextType {
 
   dailyReports: DailyReport[];
   addDailyReport: (report: Partial<DailyReport>) => Promise<void> | void;
+  updateDailyReport: (id: number, updates: Partial<DailyReport>) => Promise<void> | void;
 
   subcontracts: Subcontract[];
   addSubcontract: (subcontract: Partial<Subcontract>) => Promise<void> | void;
   updateSubcontract: (id: number, updates: Partial<Subcontract>) => Promise<void> | void;
   deleteSubcontract: (id: number) => Promise<void> | void;
+  toggleSubcontractTask: (subcontractId: number, taskId: string) => Promise<any>;
+  paySubcontractCompletedTasks: (subcontractId: number) => Promise<{ amount: number; subcontract: any }>;
 
   checklists: Checklist[];
   addChecklist: (checklist: Partial<Checklist>) => Promise<void> | void;
@@ -73,23 +81,21 @@ interface DataContextType {
 
   purchases: Purchase[];
   addPurchase: (purchase: Partial<Purchase>) => Promise<void> | void;
+  addPurchaseBatch: (order: {
+    projectId: number;
+    provider?: string;
+    deliveryDate?: string;
+    priority?: string;
+    designation?: string;
+    lines: { item: string; quantity: number; unit?: string; unitPrice?: number }[];
+  }) => Promise<void>;
   updatePurchase: (id: number, updates: Partial<any>) => Promise<void> | void;
+
+  /** Vrai pendant le chargement initial / après changement de rôle (évite d'afficher les données de l'ancienne session). */
+  isDataSyncing: boolean;
 }
 
 const DataContext = createContext<DataContextType | undefined>(undefined);
-
-const statusProgressMap: Record<string, number> = {
-  'préparation': 0,
-  'lancement': 15,
-  'exécution': 40,
-  'suivi': 65,
-  'contrôle': 85,
-  'clôture': 100,
-  'planifié': 0,
-  'en cours': 40,
-  'terminé': 100,
-  'suspendu': 0
-};
 
 export const DataProvider = ({ children }: { children: ReactNode }) => {
   const { profile, role } = useUser();
@@ -106,6 +112,23 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
   const [purchases, setPurchases] = useState<any[]>([]);
   const [subcontracts, setSubcontracts] = useState<any[]>([]);
   const [checklists, setChecklists] = useState<any[]>([]);
+  const [isDataSyncing, setIsDataSyncing] = useState(false);
+
+  const resetAllData = useCallback(() => {
+    setProjectsState([]);
+    setTransactions([]);
+    setIncidents([]);
+    setAudits([]);
+    setEmployees([]);
+    setEquipmentList([]);
+    setStockMovements([]);
+    setTickets([]);
+    setDocuments([]);
+    setDailyReports([]);
+    setPurchases([]);
+    setSubcontracts([]);
+    setChecklists([]);
+  }, []);
 
   const projectNameById = useMemo(
     () => Object.fromEntries(projects.map((p) => [p.id, p.name])),
@@ -116,10 +139,13 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
     [projects]
   );
 
-  const resolveProjectId = (value: any): number => {
+  const resolveProjectId = (value: any): number | null => {
     if (typeof value === 'number' && value > 0) return value;
-    if (typeof value === 'string' && value.trim()) return Number(projectIdByName[value] || 0);
-    return 0;
+    if (typeof value === 'string' && value.trim()) {
+      const id = Number(projectIdByName[value] || 0);
+      return id > 0 ? id : null;
+    }
+    return null;
   };
 
   const normalizeProject = (p: any): Project => ({
@@ -176,6 +202,7 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
 
   const normalizeIncident = (i: any) => {
     const projectId = Number(i.projectId || 0);
+    const images = getIncidentImagesFromRecord(i);
     return {
       id: i.id,
       type: i.type || '',
@@ -188,13 +215,25 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
       incidentDate: i.incidentDate || i.date || '',
       location: i.location || projectNameById[projectId] || i.project?.name || '',
       chantier: projectNameById[projectId] || i.project?.name || '',
-      reporter: i.reporter || '',
+      reporter:
+        i.reporter
+        || i.reporterName
+        || (i.reporterUser
+          ? `${i.reporterUser.prenom || ''} ${i.reporterUser.nom || ''}`.trim()
+          : '')
+        || '',
       status: i.status || 'Ouvert',
       actionPlan: i.actionPlan || '',
       impact: i.impact || '',
-      image: i.image || i.imageUrl || '',
-      imageUrl: i.imageUrl || i.image || '',
-      history: i.history || [],
+      image: images[0] || i.image || i.imageUrl || '',
+      imageUrl: images[0] || i.imageUrl || i.image || '',
+      images,
+      history: (i.history || []).map((h: any) => ({
+        ...h,
+        date: h.date || (h.createdAt ? String(h.createdAt).slice(0, 10) : ''),
+        user: h.user || i.reporter || '',
+        action: h.action || '',
+      })),
       projectId
     };
   };
@@ -219,8 +258,21 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
     };
   };
 
-  const normalizeEmployee = (e: any) => {
-    const projectId = Number(e.projectId || e.ProjectId || 0);
+  const normalizeEmployee = (e: any, projectMap?: Record<number, string>) => {
+    const map = projectMap ?? projectNameById;
+    const rawProjectId = Number(e.projectId || e.ProjectId || 0);
+
+    let projectId = 0;
+    if (rawProjectId > 0) {
+      const inMap = !!map[rawProjectId];
+      const hasCurrentProject =
+        !!e.currentProject?.id && Number(e.currentProject.id) === rawProjectId;
+      // Conserver l'affectation si le chantier existe (carte locale ou jointure API)
+      if (inMap || hasCurrentProject) {
+        projectId = rawProjectId;
+      }
+    }
+
     // Support for both local and VAN RH formats (permissive key matching)
     const firstName = e.prenom || e.Prenom || e.firstName || e.FirstName || '';
     const lastName = e.nom || e.Nom || e.lastName || e.LastName || '';
@@ -229,24 +281,13 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
       ? rawName
       : `${firstName} ${lastName}`.trim() || 'Inconnu';
 
-    const projectName = e.project || e.Project || e.currentProject?.name || projectNameById[projectId] || 'Non assigné';
+    const projectName = projectId
+      ? (map[projectId] || e.currentProject?.name || e._resolvedName || 'Non assigné')
+      : 'Non assigné';
     const contract = e.contract || e.Contract || e.contractType || e.ContractType || 'CDD';
     const niu = e.niu || e.NIU || e.numeroCnps || e.NumeroCnps || '';
 
-    const isVanRH = import.meta.env.VITE_DATA_SOURCE === 'van_rh';
-    const VAN_RH_URL = import.meta.env.VITE_VAN_RH_URL || 'http://10.99.173.66:4000';
-
-    const fixImageUrl = (url?: string) => {
-      if (!url) return '';
-      if (url.startsWith('http') || url.startsWith('data:')) return url;
-
-      const baseUrl = isVanRH
-        ? (import.meta.env.VITE_VAN_RH_URL || 'http://10.99.173.66:4000')
-        : (import.meta.env.VITE_API_URL || 'http://localhost:3001');
-
-      const cleanBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
-      return `${cleanBaseUrl}${url.startsWith('/') ? '' : '/'}${url}`;
-    };
+    const fixImageUrl = (url?: string) => fixIntegrationImageUrl(url);
 
     const congeStatus = e.congeStatus || '';
     const currentConge = e.currentConge || null;
@@ -269,7 +310,11 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
       assignmentHistory: e.assignments?.map((a: any) => a.project?.name).filter(Boolean) || e.assignmentHistory || [],
       isOnLeave,
       congeStatus,
-      currentConge
+      currentConge,
+      isLocal: !!(e.isLocal || e.is_local),
+      weeklySalary: e.weeklySalary != null ? Number(e.weeklySalary) : undefined,
+      isCurrentUser: !!e.isCurrentUser,
+      _virtual: !!e._virtual,
     };
   };
 
@@ -343,13 +388,21 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
       projectId,
       chantier: projectNameById[projectId] || r.project?.name || '',
       reporter: r.reporter || '',
+      reporterId: r.reporterId != null ? Number(r.reporterId) : undefined,
       location: r.location || '',
       weather: r.weather || 'Ensoleillé',
       status: r.status || 'Soumis',
       workDone: r.workDone || '',
       issuesEncountered: r.issuesEncountered || '',
       nextDayPlan: r.nextDayPlan || '',
-      workerCount: r.workerCount || 0
+      workerCount: r.workerCount || 0,
+      images: (() => {
+        if (Array.isArray(r.images)) return r.images;
+        if (typeof r.images === 'string') {
+          try { return JSON.parse(r.images); } catch { return []; }
+        }
+        return [];
+      })(),
     };
   };
 
@@ -368,6 +421,7 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
         id: String(t.id),
         title: t.title,
         completed: !!t.completed,
+        paid: !!t.paid,
         cost: Number(t.cost || 0),
         lotNumber: t.lotNumber || null,
         lotName: t.lotName || null
@@ -403,6 +457,7 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
     return {
       id: p.id,
       ref: p.ref || '',
+      orderRef: p.orderRef || '',
       item: p.item || '',
       designation: p.designation || '',
       qty: String(p.qty ?? p.quantity ?? ''),
@@ -427,13 +482,21 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
   };
 
   useEffect(() => {
-    // Déclencher le chargement dès que le rôle est connu (login ou restauration de session)
-    if (!role) return;
+    if (!role) {
+      resetAllData();
+      setIsDataSyncing(false);
+      return;
+    }
+
+    let cancelled = false;
 
     const loadAll = async () => {
+      resetAllData();
+      setIsDataSyncing(true);
       try {
         // Charger les projets EN PREMIER — les normaliseurs suivants en ont besoin (projectNameById)
         const projs = await projectService.getAll().catch(() => []);
+        if (cancelled) return;
         setProjectsState(projs.map(normalizeProject));
 
         // Puis charger toutes les autres données en parallèle
@@ -489,12 +552,12 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
         // IMPORTANT: on utilise ce map local car setProjectsState n'a pas encore déclenché le re-render
         const nameById: Record<number, string> = Object.fromEntries(projs.map((p: any) => [Number(p.id), p.name]));
         // Wrapper normaliseur qui injecte nameById local pour éviter 'Chantier inconnu'
-        const withName = (normalizer: (x: any) => any) => (item: any) => {
+        const withName = (normalizer: (x: any, map?: Record<number, string>) => any) => (item: any) => {
           const pid = Number(item.projectId || 0);
           if (pid && !item.project?.name && nameById[pid]) {
             item = { ...item, _resolvedName: nameById[pid] };
           }
-          const result = normalizer(item);
+          const result = normalizer(item, nameById);
           if (pid && result.chantier === 'Chantier inconnu' && nameById[pid]) {
             result.chantier = nameById[pid];
           }
@@ -511,34 +574,25 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
         // Traiter les employés et ajouter l'utilisateur connecté s'il n'est pas déjà dans la liste
         let processedEmployees = emp.map(withName(normalizeEmployee));
 
-        // Ajouter l'utilisateur connecté au registre du personnel s'il n'y est pas déjà
-        if (profile?.matricule) {
+        // Chef de chantier uniquement : entrée virtuelle pour le pointage local (pas pour le DT)
+        if (profile?.matricule && role === 'Chef_chantier') {
           const userMatricule = String(profile.matricule).trim().toUpperCase();
           const userExists = processedEmployees.some((e: any) =>
             String(e.matricule || '').trim().toUpperCase() === userMatricule
           );
 
           if (!userExists && profile.name) {
-            // Pour les chefs de chantier, trouver leur projet
-            let userProjectId = null;
-            if (role === 'Chef_chantier') {
-              const userProject = projs.find((p: any) => p.chefId === profile.id);
-              if (userProject) {
-                userProjectId = userProject.id;
-              }
-            }
-
-            // Créer un employé virtuel pour l'utilisateur connecté
+            const userProject = projs.find((p: any) => p.chefId === profile.id);
             const currentUserAsEmployee = {
               id: `user-${profile.id || profile.matricule}`,
               matricule: profile.matricule,
               name: profile.name,
-              role: role,
+              role,
               contract: 'Interne',
-              projectId: userProjectId, // Assigner le projet du chef de chantier
+              projectId: userProject?.id ?? null,
               email: profile.email,
-              isCurrentUser: true, // Marqueur pour identifier l'utilisateur connecté
-              _virtual: true // Marqueur pour indiquer que c'est un employé virtuel
+              isCurrentUser: true,
+              _virtual: true,
             };
             processedEmployees.push(withName(normalizeEmployee)(currentUserAsEmployee));
           }
@@ -555,17 +609,19 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
         setTickets(tks.map(normalizeTicket));
       } catch (err) {
         console.error('Erreur de synchronisation DataContext', err);
+      } finally {
+        if (!cancelled) setIsDataSyncing(false);
       }
     };
 
     loadAll();
-  }, [role]); // re-déclencher si le rôle change (login / restauration de session)
+    return () => { cancelled = true; };
+  }, [role, profile?.id, resetAllData]); // re-déclencher si le rôle ou l'utilisateur change
 
   const addProject = async (project: Omit<Project, 'id'>) => {
     // Si l'id est déjà fourni (vient du backend), juste ajouter au state local
     if ((project as any).id && typeof (project as any).id === 'number' && (project as any).id < 1e12) {
-      const progress = statusProgressMap[(project.status || '').toLowerCase()] || project.progress || 0;
-      setProjectsState((prev) => [normalizeProject({ ...project, progress }), ...prev]);
+      setProjectsState((prev) => [normalizeProject({ ...project, progress: project.progress || 0 }), ...prev]);
       return;
     }
     // Sinon créer via le backend
@@ -586,8 +642,7 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
         subCategory: ((project as any).subCategory && (project as any).subCategory !== '') ? (project as any).subCategory : null,
       };
       const created = await projectService.create(payload);
-      const progress = statusProgressMap[(created.status || '').toLowerCase()] || 0;
-      setProjectsState((prev) => [normalizeProject({ ...created, progress }), ...prev]);
+      setProjectsState((prev) => [normalizeProject({ ...created, progress: created.progress ?? 0 }), ...prev]);
     } catch (err) {
       console.error('[DataContext] addProject error:', err);
       throw err;
@@ -613,13 +668,9 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
       const updated = await projectService.update(id, payload);
       setProjectsState((prev) => prev.map((p) => {
         if (p.id !== id) return p;
-        const newStatus = updates.status || p.status;
-        // progress: ne changer que si le statut change ou si progress est explicitement fourni
         const progress = updates.progress !== undefined
           ? updates.progress
-          : updates.status && updates.status !== p.status
-            ? (statusProgressMap[(newStatus || '').toLowerCase()] ?? p.progress)
-            : p.progress;
+          : (updated.progress ?? p.progress);
         return normalizeProject({ ...p, ...updates, ...updated, progress });
       }));
     } catch (err) {
@@ -627,13 +678,7 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
       // Fallback local si le backend échoue
       setProjectsState((prev) => prev.map((p) => {
         if (p.id !== id) return p;
-        const newStatus = updates.status || p.status;
-        // progress: ne changer que si le statut change ou si progress est explicitement fourni
-        const progress = updates.progress !== undefined
-          ? updates.progress
-          : updates.status && updates.status !== p.status
-            ? (statusProgressMap[(newStatus || '').toLowerCase()] ?? p.progress)
-            : p.progress;
+        const progress = updates.progress !== undefined ? updates.progress : p.progress;
         return normalizeProject({ ...p, ...updates, progress });
       }));
       throw err;
@@ -680,23 +725,47 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
     setTransactions((prev) => [normalizeTransaction(created), ...prev]);
   };
 
+  const refreshIncidents = async () => {
+    const list = await incidentService.getAll().catch(() => []);
+    setIncidents(list.map(normalizeIncident));
+  };
+
+  const mapIncidentGravity = (gravity: string) => {
+    const map: Record<string, string> = {
+      Faible: 'Mineur',
+      Moyen: 'Modéré',
+      Haut: 'Grave',
+      Critique: 'Critique',
+      Mineur: 'Mineur',
+      'Modéré': 'Modéré',
+      Grave: 'Grave',
+    };
+    return map[gravity] || gravity || 'Mineur';
+  };
+
   const addIncident = async (incident: any) => {
     const projectId = resolveProjectId(incident.projectId || incident.chantier || incident.location);
+    if (!projectId) {
+      throw new Error('Chantier invalide — sélectionnez un chantier existant');
+    }
+    const gravity = mapIncidentGravity(incident.gravity);
+    const imageFiles: File[] = Array.isArray(incident.imageFiles)
+      ? incident.imageFiles.filter((f: unknown) => f instanceof File)
+      : (incident.imageFile instanceof File ? [incident.imageFile] : []);
 
-    // Si une image est fournie, on utilise FormData
-    if (incident.imageFile instanceof File) {
+    if (imageFiles.length > 0) {
       const formData = new FormData();
       formData.append('title', incident.title);
       formData.append('type', incident.type);
       formData.append('category', incident.category);
-      formData.append('gravity', incident.gravity);
+      formData.append('gravity', gravity);
       formData.append('description', incident.description || incident.desc || '');
       formData.append('status', incident.status || 'Ouvert');
       formData.append('actionPlan', incident.actionPlan || '');
       formData.append('impact', incident.impact || '');
       formData.append('incidentDate', incident.incidentDate || incident.date || new Date().toISOString().split('T')[0]);
       formData.append('projectId', String(projectId));
-      formData.append('image', incident.imageFile);
+      imageFiles.slice(0, 10).forEach((file) => formData.append('images', file));
 
       const created = await incidentService.create(formData);
       setIncidents((prev) => [normalizeIncident(created), ...prev]);
@@ -705,13 +774,13 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
         title: incident.title,
         type: incident.type,
         category: incident.category,
-        gravity: incident.gravity,
+        gravity,
         description: incident.description || incident.desc || '',
         status: incident.status || 'Ouvert',
         actionPlan: incident.actionPlan || '',
         impact: incident.impact || '',
         incidentDate: incident.incidentDate || incident.date || new Date().toISOString().split('T')[0],
-        projectId
+        projectId,
       };
       const created = await incidentService.create(payload);
       setIncidents((prev) => [normalizeIncident(created), ...prev]);
@@ -751,7 +820,11 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
       contract: employee.contract || 'CDD',
       niu: employee.niu || '',
       phone: employee.phone || '',
-      projectId: resolveProjectId(employee.projectId || employee.project)
+      projectId: resolveProjectId(employee.projectId || employee.project),
+      isLocal: !!employee.isLocal,
+      ...(employee.weeklySalary != null && employee.weeklySalary !== ''
+        ? { weeklySalary: Number(employee.weeklySalary) }
+        : {}),
     };
     const created = await employeeService.create(payload);
     setEmployees((prev) => [normalizeEmployee(created), ...prev]);
@@ -772,6 +845,14 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
           ? normalizeEmployee({ ...e, ...updated })
           : e
       ));
+      if (payload.projectId !== undefined) {
+        try {
+          const projs = await projectService.getAll();
+          setProjectsState(projs.map(normalizeProject));
+        } catch {
+          /* ignore */
+        }
+      }
     } catch (err: any) {
       if (updates.matricule) {
         const created = await employeeService.create(updates);
@@ -799,6 +880,12 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
           ? normalizeEmployee({ ...e, ...updated, projectId: 0 })
           : e
       ));
+      try {
+        const projs = await projectService.getAll();
+        setProjectsState(projs.map(normalizeProject));
+      } catch {
+        /* ignore */
+      }
     } catch (err: any) {
       if (err?.message?.includes('404') || err?.message?.includes('introuvable')) {
         // L'employé n'est pas dans la DB locale, il est donc déjà considéré comme non assigné
@@ -842,16 +929,17 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
       (movement.toProjectId !== undefined ? movement.toProjectId :
         (movement.chantier || movement.toChantier || movement.fromChantier));
 
-    const projectId = resolveProjectId(rawId);
+    const projectId = resolveProjectId(rawId) || 0;
     const payload = {
       type: movement.type,
       item: movement.item,
+      materialId: movement.materialId,
       quantity: Number(movement.quantity ?? movement.qty ?? 0),
       unit: movement.unit || '',
       projectId,
       movementDate: movement.movementDate || movement.date || new Date().toISOString().split('T')[0],
       toProjectId: movement.toProjectId,
-      note: movement.note
+      note: movement.note,
     };
     const created = await stockService.create(payload);
     if (created.source && created.dest) {
@@ -895,11 +983,28 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
       issuesEncountered: report.issuesEncountered || '',
       nextDayPlan: report.nextDayPlan || '',
       workerCount: Number(report.workerCount || 0),
+      images: Array.isArray(report.images) ? report.images.slice(0, 10) : [],
       reporterId: profile?.id,
       reporter: profile?.name || profile?.email || 'Utilisateur'
     };
     const created = await dailyReportService.create(payload);
     setDailyReports((prev) => [normalizeDailyReport(created), ...prev]);
+  };
+
+  const updateDailyReport = async (id: number, updates: any) => {
+    const payload = {
+      reportDate: updates.reportDate || updates.date,
+      workDone: updates.workDone,
+      issuesEncountered: updates.issuesEncountered,
+      nextDayPlan: updates.nextDayPlan,
+      workerCount: updates.workerCount != null ? Number(updates.workerCount) : undefined,
+      images: Array.isArray(updates.images) ? updates.images.slice(0, 10) : undefined,
+      status: updates.status,
+    };
+    const updated = await dailyReportService.update(id, payload);
+    setDailyReports((prev) =>
+      prev.map((r) => (r.id === id ? normalizeDailyReport(updated) : r)),
+    );
   };
 
   const addPurchase = async (purchase: any) => {
@@ -925,6 +1030,24 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
+  const addPurchaseBatch = async (order: {
+    projectId: number;
+    provider?: string;
+    deliveryDate?: string;
+    priority?: string;
+    designation?: string;
+    lines: { item: string; quantity: number; unit?: string; unitPrice?: number }[];
+  }) => {
+    try {
+      const result = await purchaseService.createBatch(order);
+      const normalized = (result.lines || []).map(normalizePurchase);
+      setPurchases((prev) => [...normalized, ...prev]);
+    } catch (error) {
+      console.error('[DataContext] addPurchaseBatch error:', error);
+      throw error;
+    }
+  };
+
   const updatePurchase = async (id: number, updates: Partial<any>) => {
     const updated = await purchaseService.updateStatus(id, updates);
     setPurchases((prev) => prev.map((p) => p.id === id ? normalizePurchase(updated) : p));
@@ -941,12 +1064,18 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
       startDate: subcontract.startDate || subcontract.date || undefined,
       projectId,
       tasks: (subcontract.tasks || []).map((t: any) => ({
+        id: t.id,
         title: (typeof t === 'string' ? t : (t.title || t.name || t.lotName)) || 'Prestation',
         cost: Number(t.cost || 0),
+        completed: t.completed,
+        paid: t.paid,
         lotNumber: t.lotNumber || 1,
-        lotName: t.lotName || 'Prestation'
-      }))
+        lotName: t.lotName || 'Prestation',
+      })),
     };
+    if (!payload.montant && payload.tasks?.length) {
+      payload.montant = payload.tasks.reduce((s: number, t: { cost: number }) => s + Number(t.cost || 0), 0);
+    }
     const created = await subcontractService.create(payload);
     setSubcontracts((prev) => [normalizeSubcontract(created), ...prev]);
   };
@@ -1001,10 +1130,17 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
   };
 
   const toggleSubcontractTask = async (subcontractId: number, taskId: string) => {
-    // Appelle le backend qui retourne le sous-traitant complet avec le bon progress
     const result = await subcontractService.toggleTask(subcontractId, taskId);
     const normalized = normalizeSubcontract(result);
-    setSubcontracts(prev => prev.map(s => String(s.id) === String(subcontractId) ? normalized : s));
+    setSubcontracts((prev) => prev.map((s) => (String(s.id) === String(subcontractId) ? normalized : s)));
+    return normalized;
+  };
+
+  const paySubcontractCompletedTasks = async (subcontractId: number) => {
+    const result = await subcontractService.payCompletedTasks(subcontractId);
+    const normalized = normalizeSubcontract(result.subcontract);
+    setSubcontracts((prev) => prev.map((s) => (String(s.id) === String(subcontractId) ? normalized : s)));
+    return { amount: Number(result.amount || 0), subcontract: normalized };
   };
 
   return (
@@ -1019,6 +1155,7 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
       incidents,
       addIncident,
       updateIncident,
+      refreshIncidents,
       audits,
       addAudit,
       employees,
@@ -1038,11 +1175,13 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
       addDocument,
       dailyReports,
       addDailyReport,
+      updateDailyReport,
       subcontracts,
       addSubcontract,
       updateSubcontract,
       deleteSubcontract,
       toggleSubcontractTask,
+      paySubcontractCompletedTasks,
       checklists,
       addChecklist,
       updateChecklist,
@@ -1050,7 +1189,9 @@ export const DataProvider = ({ children }: { children: ReactNode }) => {
       toggleChecklistTask,
       purchases,
       addPurchase,
-      updatePurchase
+      addPurchaseBatch,
+      updatePurchase,
+      isDataSyncing,
     }}>
       {children}
     </DataContext.Provider>

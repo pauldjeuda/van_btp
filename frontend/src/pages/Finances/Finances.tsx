@@ -4,7 +4,7 @@ import { Card, Button, Input, Modal, cn } from '../../components/ui';
 import {
   TrendingUp, TrendingDown, Receipt, Banknote,
   ArrowUpRight, Search, Building2, AlertTriangle,
-  Wallet, RefreshCw, BarChart3, BookOpen, FileText
+  Wallet, RefreshCw, BarChart3, FileText
 } from 'lucide-react';
 
 import { usePermissions } from '../../hooks/usePermissions';
@@ -30,7 +30,7 @@ const { can } = usePermissions();
   const today = new Date().toISOString().split('T')[0];
 
   // ── Onglets ──
-  const [mainTab, setMainTab] = useState<'flux' | 'rentabilite' | 'comptabilite'>('flux');
+  const [mainTab, setMainTab] = useState<'flux' | 'rentabilite'>('flux');
   const [txTab, setTxTab] = useState<'all' | 'expenses' | 'invoices'>('all');
 
   // ── Filtres ──
@@ -68,11 +68,6 @@ const { can } = usePermissions();
   const [analysis, setAnalysis] = useState<any>(null);
   const [kpiData, setKpiData] = useState<any>(null);
   const [loadingKpi, setLoadingKpi] = useState(false);
-
-  // ── Comptabilité ──
-  const [accounting, setAccounting] = useState<any[]>([]);
-  const [loadingAccounting, setLoadingAccounting] = useState(false);
-  const [accFilters, setAccFilters] = useState({ projectId: '', from: '', to: '' });
 
   // ── Forms ──
   const CATEGORY_PROVIDERS: Record<string, string> = {
@@ -141,20 +136,6 @@ const { can } = usePermissions();
     finally { setLoadingKpi(false); }
   };
   React.useEffect(() => { if (mainTab === 'rentabilite' && !kpiData) loadKpis(); }, [mainTab]);
-
-
-  const loadAccounting = async () => {
-    setLoadingAccounting(true);
-    try {
-      const f: any = {};
-      if (accFilters.projectId) f.projectId = Number(accFilters.projectId);
-      if (accFilters.from) f.from = accFilters.from;
-      if (accFilters.to) f.to = accFilters.to;
-      setAccounting(await financialAnalysisService.getAccounting(f));
-    } catch { /* */ }
-    finally { setLoadingAccounting(false); }
-  };
-  React.useEffect(() => { if (mainTab === 'comptabilite') loadAccounting(); }, [mainTab]);
 
   // Variables dérivées pour les dettes (calculées avant le return)
   const activeDebts = debts.filter((d: any) => d.debtStatus !== 'Remboursé');
@@ -469,7 +450,6 @@ const { can } = usePermissions();
         {([
           { key: 'flux', label: 'Flux de trésorerie' },
           { key: 'rentabilite', label: 'Rentabilité' },
-          { key: 'comptabilite', label: 'Comptabilité' },
         ] as const).map(tab => (
           <button key={tab.key} onClick={() => setMainTab(tab.key)}
             className={cn('px-4 py-2 rounded-lg text-sm font-semibold transition-all whitespace-nowrap',
@@ -744,97 +724,6 @@ const { can } = usePermissions();
         </div>
       )}
 
-      {/* ═══════════════════ ONGLET COMPTABILITÉ ═══════════════════ */}
-      {mainTab === 'comptabilite' && (
-        <div className="space-y-4">
-          <div className="flex flex-wrap gap-3 items-end">
-            <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider block">Chantier</label>
-              <select value={accFilters.projectId} onChange={e => setAccFilters(p => ({ ...p, projectId: e.target.value }))}
-                className="h-10 px-3 border border-slate-200 rounded-xl text-sm bg-white outline-none focus:ring-2 focus:ring-[var(--color-primary)]">
-                <option value="">Tous</option>
-                {projects.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-            </div>
-            <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider block">Du</label>
-              <input type="date" value={accFilters.from} onChange={e => setAccFilters(p => ({ ...p, from: e.target.value }))}
-                className="h-10 px-3 border border-slate-200 rounded-xl text-sm outline-none" />
-            </div>
-            <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider block">Au</label>
-              <input type="date" value={accFilters.to} onChange={e => setAccFilters(p => ({ ...p, to: e.target.value }))}
-                className="h-10 px-3 border border-slate-200 rounded-xl text-sm outline-none" />
-            </div>
-            <Button onClick={loadAccounting} size="sm" disabled={loadingAccounting} className="gap-2">
-              <RefreshCw className={`w-3.5 h-3.5 ${loadingAccounting ? 'animate-spin' : ''}`} /> Filtrer
-            </Button>
-          </div>
-
-          <Card>
-            <div className="p-4 border-b border-slate-100 flex items-start justify-between">
-              <div>
-                <h2 className="font-bold text-slate-900">{t('finances.accounting')}</h2>
-                <p className="text-xs text-slate-400 mt-0.5">{accounting.length} écriture(s) · 411 Clients · 706 CA · 601 Achats · 401 Fournisseurs</p>
-              </div>
-            </div>
-            {loadingAccounting ? (
-              <div className="flex justify-center py-12"><div className="animate-spin h-7 w-7 border-2 border-[var(--color-primary)] border-t-transparent rounded-full" /></div>
-            ) : accounting.length === 0 ? (
-              <div className="py-12 text-center">
-                <BookOpen className="w-10 h-10 text-slate-200 mx-auto mb-3" />
-                <p className="text-sm text-slate-400">Aucune écriture — les écritures sont générées automatiquement</p>
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full">
-                  <thead>
-                    <tr className="bg-slate-50 border-b border-slate-200">
-                      {['Date', 'Chantier', 'Libellé', 'Compte', 'Débit', 'Crédit', 'Réf.'].map(h => (
-                        <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {[...accounting].sort((a: any, b: any) => {
-                      const dateDiff = new Date(b.journalDate).getTime() - new Date(a.journalDate).getTime();
-                      if (dateDiff !== 0) return dateDiff;
-                      return b.id - a.id;
-                    }).map((entry: any) => (
-                      <tr key={entry.id} className="hover:bg-slate-50">
-                        <td className="px-4 py-3 text-sm text-slate-600 font-mono whitespace-nowrap">{entry.journalDate}</td>
-                        <td className="px-4 py-3 text-sm text-slate-700 max-w-[120px] truncate">{entry.project?.name || '—'}</td>
-                        <td className="px-4 py-3 text-sm text-slate-700 max-w-[180px] truncate" title={entry.label}>{entry.label}</td>
-                        <td className="px-4 py-3">
-                          <span className={cn('text-xs font-bold px-2 py-0.5 rounded-full font-mono', {
-                            'bg-blue-100 text-blue-700': entry.account === '411',
-                            'bg-emerald-100 text-emerald-700': entry.account === '706',
-                            'bg-amber-100 text-amber-700': entry.account === '601',
-                            'bg-slate-100 text-slate-600': entry.account === '401',
-                          })}>
-                            {entry.account} {entry.accountLabel}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-sm font-bold text-slate-900 text-right whitespace-nowrap">{Number(entry.debit) > 0 ? fmt(Number(entry.debit)) : '—'}</td>
-                        <td className="px-4 py-3 text-sm font-bold text-slate-900 text-right whitespace-nowrap">{Number(entry.credit) > 0 ? fmt(Number(entry.credit)) : '—'}</td>
-                        <td className="px-4 py-3 text-xs text-slate-400 font-mono">{entry.reference || '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                  <tfoot className="bg-slate-900 text-white">
-                    <tr>
-                      <td colSpan={4} className="px-4 py-3 text-sm font-bold">TOTAUX</td>
-                      <td className="px-4 py-3 text-sm font-bold text-right whitespace-nowrap">{fmt(accounting.reduce((s: number, e: any) => s + Number(e.debit || 0), 0))}</td>
-                      <td className="px-4 py-3 text-sm font-bold text-right whitespace-nowrap">{fmt(accounting.reduce((s: number, e: any) => s + Number(e.credit || 0), 0))}</td>
-                      <td></td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-            )}
-          </Card>
-        </div>
-      )}
 
       {/* ═══════════════════ MODALES ═══════════════════ */}
 

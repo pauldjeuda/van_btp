@@ -21,7 +21,7 @@ const RefreshToken = sequelize.define('RefreshToken', {
     allowNull: false,
   },
   userRole: {
-    type: DataTypes.ENUM('Directeur_technique', 'Chef_chantier', 'Technicien_chantier', 'RH'),
+    type: DataTypes.ENUM('Directeur technique', 'Chef_chantier', 'Gerant_production', 'Gestionnaire de stocks'),
     allowNull: false,
   },
   expiresAt: {

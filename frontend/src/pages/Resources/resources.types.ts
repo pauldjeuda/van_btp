@@ -18,11 +18,15 @@ export interface AttendanceRecord {
   note: string;
 }
 
+export interface NewServiceProviderTask {
+  title: string;
+  cost: string;
+}
+
 export interface NewServiceProvider {
   name: string;
   projectId: number;
-  tasks: string[];
-  totalCost: string;
+  tasks: NewServiceProviderTask[];
 }
 
 /** Unités par défaut pour les articles courants du BTP */
@@ -51,7 +55,7 @@ export type AttendanceStatus = typeof ATTENDANCE_STATUSES[number];
 
 /** Défaut onglet actif selon le rôle */
 export const getDefaultTab = (role: string | null): ResourceTab => {
-  if (role === 'Directeur_technique' || role === 'Chef_chantier') return 'purchases';
-  if (role === 'RH') return 'hr';
+  if (role === 'Gestionnaire de stocks') return 'stock';
+  if (role === 'Chef_chantier' || role === 'Directeur technique') return 'purchases';
   return 'stock';
 };

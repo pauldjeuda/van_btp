@@ -4,6 +4,7 @@ const ctrl    = require('../controllers/incident.controller');
 const verifyToken  = require('../middlewares/verifyToken');
 const verifyRole   = require('../middlewares/verifyRole');
 const upload       = require('../services/upload.service');
+const { ROLE_DG, ROLE_CHEF } = require('../utils/roles');
 
 // Middleware qui fixe le dossier destination avant Multer
 const setIncidentFolder = (req, _res, next) => {
@@ -11,10 +12,10 @@ const setIncidentFolder = (req, _res, next) => {
   next();
 };
 
-router.get('/',    verifyToken, verifyRole(['Directeur_technique', 'Chef_chantier', 'Technicien_chantier']), ctrl.getAll);
-router.get('/:id', verifyToken, verifyRole(['Directeur_technique', 'Chef_chantier', 'Technicien_chantier']), ctrl.getById);
-router.post('/',   verifyToken, verifyRole(['Chef_chantier', 'Technicien_chantier']),
-  setIncidentFolder, upload.single('image'), ctrl.create);
-router.put('/:id', verifyToken, verifyRole(['Directeur_technique', 'Chef_chantier']), ctrl.update);
+router.get('/',    verifyToken, verifyRole([ROLE_DG, ROLE_CHEF]), ctrl.getAll);
+router.get('/:id', verifyToken, verifyRole([ROLE_DG, ROLE_CHEF]), ctrl.getById);
+router.post('/',   verifyToken, verifyRole([ROLE_CHEF]),
+  setIncidentFolder, upload.array('images', 10), ctrl.create);
+router.put('/:id', verifyToken, verifyRole([ROLE_CHEF]), ctrl.update);
 
 module.exports = router;

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Users,
@@ -41,6 +41,8 @@ import { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, Ta
 import { exportToCSV } from '../../lib/exportUtils';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { Navigate, useLocation } from 'react-router-dom';
+import { scrollToHashElement } from '../../lib/scrollToHash';
 
 const data: any[] = [];
 const pieData: any[] = [];
@@ -51,34 +53,44 @@ import { usePermissions } from '../../hooks/usePermissions';
 import { useUser } from '../../context/UserContext';
 import { useData } from '../../context/DataContext';
 import { useNotification } from '../../context/NotificationContext';
-import { projectService } from '../../services/project.service';
+import { filterProjectsForRole } from '../../lib/projectAccess';
 import { dashboardService } from '../../services/dashboard.service';
-import { attendanceService } from '../../services/attendance.service';
 import { projectTaskService } from '../../services/projectTask.service';
 import { StatCard, ProjectRow, AlertItem } from './DashboardComponents';
+import { PendingApprovalsPanel } from './PendingApprovalsPanel';
+import type { PendingApprovalsResponse } from '../../services/approval.service';
+import { ReportPhotos } from '../../components/project/ReportPhotos';
+import { getIncidentImagesFromRecord } from '../../lib/incidentImages';
 
 export const Dashboard = () => {
-    const { t } = useTranslation();
-const { can } = usePermissions();
+  const { t } = useTranslation();
+  const { can } = usePermissions();
   const { profile, role } = useUser();
-  const { projects, setProjects, transactions, incidents, employees, checklists, toggleChecklistTask } = useData();
-  const { notify } = useNotification();
+  const dashRole = role === 'Directeur technique' ? 'dg' : 'chef';
 
-  const currentEmployee = employees.find(e => 
-    String(e.matricule || '').trim().toUpperCase() === String(profile?.matricule || '').trim().toUpperCase()
+  if (role === 'Gestionnaire de stocks') {
+    return <Navigate to="/resources" replace />;
+  }
+  if (role === 'Gerant_production') {
+    return <Navigate to="/production" replace />;
+  }
+
+  const { projects, transactions, incidents, employees, checklists, refreshIncidents } = useData();
+  const visibleProjects = useMemo(
+    () => filterProjectsForRole(projects, role, profile?.id),
+    [projects, role, profile?.id],
   );
-  const technicianProjectId = currentEmployee?.projectId || 0;
-  const technicianProject = currentEmployee?.project;
-  const technicianHistory = currentEmployee?.assignmentHistory || [];
-  const technicianChecklists = checklists.filter(c => technicianProjectId ? c.projectId === technicianProjectId : false);
-  const [technicianTasks, setTechnicianTasks] = useState<any[]>([]);
+  const { notify, pushPersistent } = useNotification();
+  const location = useLocation();
+  const [alertsHighlight, setAlertsHighlight] = useState(false);
+  const dgIncidentSeenKey = 'van_dg_incident_notified_ids';
 
   const [selectedRegion, setSelectedRegion] = useState('__all_regions__');
   const [selectedProject, setSelectedProject] = useState<number | null>(null); // null = tous les chantiers
-  
+
   const [isRegionFilterOpen, setIsRegionFilterOpen] = useState(false);
   const [isProjectFilterOpen, setIsProjectFilterOpen] = useState(false);
-    const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isConvoquerModalOpen, setIsConvoquerModalOpen] = useState(false);
   const [isIncidentModalOpen, setIsIncidentModalOpen] = useState(false);
   const [isEscaladerModalOpen, setIsEscaladerModalOpen] = useState(false);
@@ -87,114 +99,93 @@ const { can } = usePermissions();
 
   const [exportStep, setExportStep] = useState(1);
 
-  // Charger les projets depuis l'API au montage (comme dans Projects/index.tsx)
   useEffect(() => {
-    const loadProjects = async () => {
-      try {
-        const [data, kpis] = await Promise.all([
-          projectService.getAll(),
-          dashboardService.getKPIs().catch(() => null),
-        ]);
-        setBackendKpis(kpis);
-        const normalized = data.map((p: any) => ({
-          id: p.id,
-          code: p.code,
-          name: p.name,
-          client: p.client,
-          status: p.status,
-          budget: Number(p.budget || 0),
-          progress: p.progress || 0,
-          location: p.location || '',
-          region: p.region || '',
-          manager: p.manager || '',
-          start: p.startDate || '',
-          end: p.endDate || '',
-        }));
-        setProjects(normalized);
-      } catch (err: any) {
-        notify(err.message || 'Erreur lors du chargement des chantiers', 'error');
-      }
-    };
+    if (location.hash === '#business-alerts') {
+      scrollToHashElement('#business-alerts');
+      setAlertsHighlight(true);
+      const timer = window.setTimeout(() => setAlertsHighlight(false), 2500);
+      return () => window.clearTimeout(timer);
+    }
+  }, [location.pathname, location.hash]);
 
-    loadProjects();
-  }, []);
+  useEffect(() => {
+    if (role !== 'Directeur technique') return;
+    const open = incidents.filter((i) => i.status !== 'Résolu' && i.status !== 'Fermé');
+    const initKey = `${dgIncidentSeenKey}_init`;
+    if (!sessionStorage.getItem(initKey)) {
+      sessionStorage.setItem(dgIncidentSeenKey, JSON.stringify(open.map((i) => i.id)));
+      sessionStorage.setItem(initKey, '1');
+      return;
+    }
+    const seen = new Set<number>(JSON.parse(sessionStorage.getItem(dgIncidentSeenKey) || '[]'));
+    open.forEach((inc) => {
+      if (seen.has(inc.id)) return;
+      const site = visibleProjects.find((p) => p.id === inc.projectId)?.name || t('dashboard.unknown_site');
+      pushPersistent(
+        t('dashboard.notifications.new_incident', { title: inc.title, site }),
+        inc.gravity === 'Critique' ? 'warning' : 'info',
+        '/dashboard#business-alerts',
+      );
+      seen.add(inc.id);
+    });
+    sessionStorage.setItem(dgIncidentSeenKey, JSON.stringify([...seen]));
+  }, [incidents, role, projects, pushPersistent, t]);
+
+  useEffect(() => {
+    if (role !== 'Directeur technique') return;
+    const interval = window.setInterval(() => refreshIncidents().catch(() => {}), 45000);
+    return () => window.clearInterval(interval);
+  }, [role, refreshIncidents]);
+
+  useEffect(() => {
+    const refreshKpis = async () => {
+      if (role !== 'Directeur technique') return;
+      try {
+        const kpis = await dashboardService.getKPIs();
+        setBackendKpis(kpis);
+      } catch { /* ignore */ }
+    };
+    refreshKpis();
+    window.addEventListener('van_btp:approvals_updated', refreshKpis);
+    return () => window.removeEventListener('van_btp:approvals_updated', refreshKpis);
+  }, [role]);
+
   const [activeDeepDive, setActiveDeepDive] = useState<string | null>(null);
   const [exportFormat, setExportFormat] = useState('Excel Consolidé (Données Brutes)');
   const [isExporting, setIsExporting] = useState(false);
   const [selectedAlert, setSelectedAlert] = useState<any>(null);
   const [backendKpis, setBackendKpis] = useState<any | null>(null);
 
-  // Individual Clocking State
-  const [todayAttendance, setTodayAttendance] = useState<any>(null);
-  const [isClocking, setIsClocking] = useState(false);
+  const handlePendingApprovalsUpdated = useCallback((pending: PendingApprovalsResponse) => {
+    setBackendKpis((prev: any) => (prev ? { ...prev, pendingApprovals: pending } : { pendingApprovals: pending }));
+  }, []);
 
-  useEffect(() => {
-    if (currentEmployee?.id) {
-      attendanceService.checkToday(currentEmployee.id).then(setTodayAttendance);
-    }
-  }, [currentEmployee?.id]);
-
-  // Charger les tâches du technicien
-  useEffect(() => {
-    if (role === 'Technicien_chantier' && technicianProjectId && currentEmployee?.id) {
-      const loadTasks = async () => {
-        try {
-          const tasks = await projectTaskService.getAll(technicianProjectId);
-          // Filtrer les tâches assignées au technicien actuel
-          const myTasks = tasks.filter(task => task.assignedTo === currentEmployee.id);
-          setTechnicianTasks(myTasks);
-        } catch (err) {
-          console.error('Erreur chargement tâches:', err);
-        }
-      };
-      loadTasks();
-    }
-  }, [role, technicianProjectId, currentEmployee?.id]);
-
-  const handleClockAction = async () => {
-    if (!currentEmployee?.id || !technicianProjectId) {
-      notify("Impossible de pointer : Vous n'êtes pas affecté à un chantier.", "warning");
-      return;
-    }
-    
-    setIsClocking(true);
-    try {
-      const type = todayAttendance?.arrivalTime ? 'departure' : 'arrival';
-      const result = await attendanceService.clockAction({
-        employeeId: currentEmployee.id,
-        projectId: technicianProjectId,
-        type
-      });
-      
-      // Update local state
-      const updated = await attendanceService.checkToday(currentEmployee.id);
-      setTodayAttendance(updated);
-      
-      const time = result.time;
-      const isLate = type === 'arrival' && time > '08:00';
-      const message = type === 'arrival' 
-        ? `Pointage d'arrivée à ${time}. ${isLate ? "Attention, vous êtes en retard (limite 08:00)." : "Vous êtes à l'heure !"}`
-        : `Pointage de départ à ${time}. Bonne soirée !`;
-        
-      notify(message, isLate ? 'warning' : 'success');
-    } catch (err: any) {
-      notify("Erreur lors du pointage.", "error");
-    } finally {
-      setIsClocking(false);
-    }
+  const openIncidentAlertDetail = (incident: (typeof incidents)[0]) => {
+    setIsAlertCenterModalOpen(false);
+    setSelectedAlert({
+      incidentId: incident.id,
+      title: `Incident ${incident.gravity}`,
+      chantier: visibleProjects.find(p => p.id === incident.projectId)?.name || t('dashboard.unknown_site'),
+      type: incident.type,
+      description: incident.description || incident.desc,
+      date: incident.date,
+      statut: incident.status,
+      image: incident.image,
+      images: incident.images,
+    });
   };
 
   // Filtered Data
-  const effectiveProjectFilter = role === 'Technicien_chantier' ? (technicianProjectId || 'None') : selectedProject;
+  const effectiveProjectFilter = selectedProject;
 
-  const filteredSourceProjects = projects.filter(p => {
+  const filteredSourceProjects = visibleProjects.filter(p => {
     const matchesRegion = selectedRegion === '__all_regions__' || p.region === selectedRegion;
     const matchesProject = effectiveProjectFilter === null || effectiveProjectFilter === 'None' || p.id === effectiveProjectFilter;
     return matchesRegion && matchesProject;
   });
 
   const filteredSourceTransactions = transactions.filter(t => {
-    const project = projects.find(p => p.id === t.projectId);
+    const project = visibleProjects.find(p => p.id === t.projectId);
     if (!project) return false; // Ignorer les transactions sans projet valide
 
     const matchesProject = effectiveProjectFilter === null || effectiveProjectFilter === 'None' || t.projectId === effectiveProjectFilter;
@@ -203,7 +194,7 @@ const { can } = usePermissions();
   });
 
   const filteredSourceIncidents = incidents.filter(i => {
-    const project = projects.find(p => p.id === i.projectId);
+    const project = visibleProjects.find(p => p.id === i.projectId);
     if (!project) return false; // Ignorer les incidents sans projet valide
 
     const matchesProject = effectiveProjectFilter === null || effectiveProjectFilter === 'None' || i.projectId === effectiveProjectFilter;
@@ -233,8 +224,8 @@ const { can } = usePermissions();
     };
   });
 
-  
-  const isGlobalView = (selectedProject === null || selectedProject === 'None') && selectedRegion === '__all_regions__' && role !== 'Technicien_chantier';
+
+  const isGlobalView = (selectedProject === null || selectedProject === 'None') && selectedRegion === '__all_regions__';
 
   const totalBudget = (isGlobalView && backendKpis?.projects?.budgetTotal)
     ? backendKpis.projects.budgetTotal
@@ -263,7 +254,7 @@ const { can } = usePermissions();
     : localPaid;
   const formattedEncaisse = new Intl.NumberFormat('fr-FR').format(totalEncaisse).replace(/\s/g, ' ');
 
-  // Marge = Encaissé - Dépenses (même source pour les deux)
+  // Marge = Encaissé - Dépenses (meme source pour les deux)
   const totalMargin = totalEncaisse - totalExpenses;
   const formattedMargin = new Intl.NumberFormat('fr-FR').format(totalMargin).replace(/\s/g, ' ');
 
@@ -275,7 +266,7 @@ const { can } = usePermissions();
   const criticalIncidents = (isGlobalView && backendKpis?.incidents?.graves) ? backendKpis.incidents.graves : filteredSourceIncidents.filter(i => i.gravity === 'Critique').length;
 
   // Dynamic chart data
-  const months = ['Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Juin', 'Juil', 'Août', 'Sep', 'Oct', 'Nov', 'Déc'];
+  const months = ['Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Juin', 'Juil', 'AoÃ»t', 'Sep', 'Oct', 'Nov', 'Déc'];
   const allMonths = months;
 
   const dynamicChartData = allMonths.map((monthName, idx) => {
@@ -297,13 +288,13 @@ const { can } = usePermissions();
     // Project date alignment logic
     let isWithinProjectBounds = true;
     if (selectedProject !== null) {
-      const proj = projects.find(p => p.id === selectedProject);
+      const proj = visibleProjects.find(p => p.id === selectedProject);
       if (proj && proj.start && proj.end) {
         const start = new Date(proj.start);
         const end = new Date(proj.end);
         const currentMonthFirstDay = new Date(currentYear, idx, 1);
         isWithinProjectBounds = currentMonthFirstDay >= new Date(start.getFullYear(), start.getMonth(), 1) &&
-                                 currentMonthFirstDay <= new Date(end.getFullYear(), end.getMonth(), 1);
+          currentMonthFirstDay <= new Date(end.getFullYear(), end.getMonth(), 1);
       }
     }
 
@@ -331,9 +322,9 @@ const { can } = usePermissions();
     value: totalExpenseValue > 0 ? Math.round((item.value / totalExpenseValue) * 100) : 0
   }));
 
-  const projectRegions = Array.from(new Set(projects.map(p => p.region))).map((regionName: string) => {
+  const projectRegions = Array.from(new Set(visibleProjects.map(p => p.region))).map((regionName: string) => {
     // For region stats, we use all projects in that region regardless of selectedProject
-    const regionProjects = projects.filter(p => p.region === regionName).map(p => {
+    const regionProjects = visibleProjects.filter(p => p.region === regionName).map(p => {
       const budgetValue = Math.round(Number(p.budget)) || 0;
       return { ca: budgetValue * (p.progress / 100) };
     });
@@ -355,7 +346,7 @@ const { can } = usePermissions();
         properties: {},
         children: [
           new Paragraph({
-            text: "RAPPORT MENSUEL CONSOLIDÉ - VAN BTP",
+            text: "RAPPORT MENSUEL CONSOLIDé - VAN BTP",
             heading: HeadingLevel.HEADING_1,
             alignment: "center",
           }),
@@ -365,7 +356,7 @@ const { can } = usePermissions();
           }),
           new Paragraph({ text: "" }),
           new Paragraph({
-            text: "1. PERFORMANCE FINANCIÈRE",
+            text: "1. PERFORMANCE FINANCIÃˆRE",
             heading: HeadingLevel.HEADING_2,
           }),
           new Paragraph({
@@ -382,7 +373,7 @@ const { can } = usePermissions();
           }),
           new Paragraph({ text: "" }),
           new Paragraph({
-            text: "2. ÉTAT D'AVANCEMENT DES CHANTIERS",
+            text: "2. éTAT D'AVANCEMENT DES CHANTIERS",
             heading: HeadingLevel.HEADING_2,
           }),
           new Table({
@@ -421,19 +412,19 @@ const { can } = usePermissions();
     // Header stylisé
     doc.setFillColor(26, 54, 93); // #1a365d
     doc.rect(0, 0, 210, 40, 'F');
-    
+
     doc.setTextColor(255, 255, 255);
     doc.setFontSize(22);
-    doc.text("VAN BTP - RAPPORT CONSOLIDÉ", 105, 20, { align: 'center' });
-    
+    doc.text("VAN BTP - RAPPORT CONSOLIDé", 105, 20, { align: 'center' });
+
     doc.setFontSize(10);
     doc.text(`Date de génération : ${new Date().toLocaleDateString('fr-FR')}`, 105, 30, { align: 'center' });
 
     // Section 1: Finances
     doc.setTextColor(26, 54, 93);
     doc.setFontSize(16);
-    doc.text("1. RÉSUMÉ FINANCIER", 14, 55);
-    
+    doc.text("1. RéSUMé FINANCIER", 14, 55);
+
     doc.setDrawColor(226, 232, 240);
     doc.line(14, 58, 196, 58);
 
@@ -458,8 +449,8 @@ const { can } = usePermissions();
     doc.setTextColor(26, 54, 93);
     doc.setFont("helvetica", "bold");
     doc.setFontSize(16);
-    doc.text("2. ÉTAT D'AVANCEMENT DES CHANTIERS", 14, 110);
-    
+    doc.text("2. éTAT D'AVANCEMENT DES CHANTIERS", 14, 110);
+
     doc.line(14, 113, 196, 113);
 
     const tableData = dashboardProjects.map(p => [
@@ -472,7 +463,7 @@ const { can } = usePermissions();
 
     autoTable(doc, {
       startY: 120,
-      head: [['RÉF', 'CHANTIER', 'CLIENT', 'PROGRÈS', 'STATUT']],
+      head: [['RéF', 'CHANTIER', 'CLIENT', 'PROGRÃˆS', 'STATUT']],
       body: tableData,
       theme: 'striped',
       headStyles: { fillColor: [26, 54, 93], textColor: 255, fontStyle: 'bold' },
@@ -500,20 +491,20 @@ const { can } = usePermissions();
     await new Promise(resolve => setTimeout(resolve, 1500));
 
     const fileName = `Rapport_Consolide_VAN_BTP_${new Date().toISOString().split('T')[0]}`;
-    
+
     // Mapper les données en français pour l'export professionnel
     const exportData = dashboardProjects.map(p => ({
-      'RÉFÉRENCE': p.code,
-      'DÉSIGNATION CHANTIER': p.name,
+      'RéFéRENCE': p.code,
+      'DéSIGNATION CHANTIER': p.name,
       'CLIENT': p.client,
-      'RÉGION': p.region,
+      'RéGION': p.region,
       'LOCALISATION': p.location,
       'BUDGET GLOBAL (FCFA)': p.budget,
-      'CA RÉALISÉ (FCFA)': Math.round(p.ca),
+      'CA RéALISé (FCFA)': Math.round(p.ca),
       'AVANCEMENT (%)': `${p.progress}%`,
       'STATUT': p.status,
-      'DATE DÉBUT': p.start,
-      'DATE FIN PRÉVUE': p.end,
+      'DATE DéBUT': p.start,
+      'DATE FIN PRéVUE': p.end,
       'CONDUCTEUR TRAVAUX': p.manager
     }));
 
@@ -534,7 +525,7 @@ const { can } = usePermissions();
 
     setIsExporting(false);
     setExportStep(3);
-    notify(`Rapport exporté avec succès au format ${exportFormat.split(' ')[0]}.`, 'success', '/dashboard');
+    notify(t('dashboard.notifications.export_success', { format: exportFormat.split(' ')[0] }), 'success', '/dashboard');
   };
 
   return (
@@ -544,28 +535,17 @@ const { can } = usePermissions();
         <div>
           <div className="flex items-center gap-2 text-[var(--color-primary)] font-bold text-sm uppercase tracking-widest mb-2">
             <Activity className="w-4 h-4" />
-            <span>Pilotage {
-              role === 'Directeur_technique' ? 'Global Direction Générale' :
-                role === 'Chef_chantier' ? 'Opérationnel Chef Chantier' :
-                  role === 'RH' ? 'Ressources Humaines' :
-                    'Terrain Technicien'
-            } </span>
+            <span>{t('dashboard.pilotage_prefix')} {t(`dashboard.roles.pilotage_${dashRole}`)}</span>
           </div>
           <h1 className="text-4xl font-black text-slate-900 tracking-tighter">
-            {role === 'Directeur_technique' ? 'Tableau de Bord Global' :
-              role === 'Chef_chantier' ? 'Synthèse du Chantier' :
-                role === 'RH' ? 'Tableau de Bord RH' :
-                  'Suivi de Chantier'}
+            {t(`dashboard.roles.title_${dashRole}`)}
           </h1>
           <p className="text-slate-500 font-medium mt-1">
-            {role === 'Directeur_technique' ? 'Performance consolidée et indicateurs stratégiques' :
-              role === 'Chef_chantier' ? 'Performance opérationnelle et alertes critiques' :
-                role === 'RH' ? 'Gestion du personnel et des affectations' :
-                  'Saisie des rapports et suivi des tâches'}
+            {t(`dashboard.roles.desc_${dashRole}`)}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          {(role === 'Directeur_technique' || role === 'Chef_chantier') && (
+          {(role === 'Directeur technique') && (
             <div className="flex gap-2">
               <Button variant="outline" size="sm" className="bg-white" onClick={() => setIsRegionFilterOpen(true)}>
                 <Filter className="w-4 h-4 mr-2" />
@@ -573,14 +553,14 @@ const { can } = usePermissions();
               </Button>
               <Button variant="outline" size="sm" className="bg-white" onClick={() => setIsProjectFilterOpen(true)}>
                 <HardHat className="w-4 h-4 mr-2" />
-                {selectedProject === null ? null : projects.find(p => p.id === selectedProject)?.name || 'Chantier inconnu'}
+                {selectedProject === null ? null : visibleProjects.find(p => p.id === selectedProject)?.name || t('dashboard.unknown_site')}
               </Button>
             </div>
           )}
-          {(role === 'Directeur_technique' || role === 'Chef_chantier') && (
+          {(role === 'Directeur technique') && (
             <Button size="sm" className="shadow-lg shadow-blue-900/20" onClick={() => { setIsExportModalOpen(true); setExportStep(1); }}>
               <Download className="w-4 h-4 mr-2" />
-              Exporter Rapport {role === 'Directeur_technique' ? 'Consolidé' : 'Mensuel'}
+              {role === 'Chef_chantier' ? t('dashboard.export_consolidated') : t('dashboard.export_monthly')}
             </Button>
           )}
         </div>
@@ -588,16 +568,16 @@ const { can } = usePermissions();
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        {(role === 'Directeur_technique' || role === 'Chef_chantier') && (
+        {(role === 'Directeur technique') && (
           <>
             <StatCard
-              title="Budget Global"
+              title={t('dashboard.stats.global_budget')}
               value={formattedBudget}
               unit="FCFA"
               change="+12.5%"
               isPositive={true}
               icon={Building2}
-              trend="Total Marchés"
+              trend={t('dashboard.stats.total_markets')}
               onClick={() => setActiveDeepDive('sites')}
             />
             <StatCard
@@ -607,32 +587,32 @@ const { can } = usePermissions();
               change="+8.2%"
               isPositive={true}
               icon={TrendingUp}
-              trend="Total Invoices"
+              trend={t('dashboard.total_invoices')}
               onClick={() => setActiveDeepDive('ca')}
             />
             <StatCard
-              title="Total Encaissé"
+              title={t('dashboard.stats.total_collected')}
               value={formattedEncaisse}
               unit="FCFA"
               change="+5.4%"
               isPositive={true}
               icon={ArrowUpRight}
-              trend="Versements"
+              trend={t('dashboard.stats.payments')}
               onClick={() => setActiveDeepDive('ca')}
             />
             <StatCard
-              title="Dépenses Engagées"
+              title={t('dashboard.engaged_expenses')}
               value={formattedExpenses}
               unit="FCFA"
               change="+15.2%"
               isPositive={false}
               icon={Banknote}
-              trend="Total Expenses"
+              trend={t('dashboard.total_expenses')}
               onClick={() => setActiveDeepDive('margin')}
             />
           </>
         )}
-        {role === 'RH' && (
+        {role === 'Chef_chantier' && (
           <>
             <StatCard
               title="Total Personnel"
@@ -645,7 +625,7 @@ const { can } = usePermissions();
             />
             <StatCard
               title="Chantiers Actifs"
-              value={projects.length.toString()}
+              value={visibleProjects.length.toString()}
               unit="Sites"
               change="0"
               isPositive={true}
@@ -672,51 +652,19 @@ const { can } = usePermissions();
             />
           </>
         )}
-        {role === 'Technicien_chantier' && (
-          <>
-            <StatCard
-              title="Chantier Actuel"
-              value={technicianProject || "Non assigné"}
-              unit=""
-              change=""
-              isPositive={true}
-              icon={Building2}
-              trend="Affectation en cours"
-            />
-            <StatCard
-              title="Tâches du Jour"
-              value={technicianChecklists.reduce((acc, c) => acc + c.tasks.filter(t => !t.completed).length, 0).toString()}
-              unit="Tâches"
-              change=""
-              isPositive={true}
-              icon={Activity}
-              trend="À réaliser"
-            />
-            <StatCard
-              title="Incidents Signalés"
-              value={filteredSourceIncidents.length.toString()}
-              unit="Incidents"
-              change=""
-              isPositive={false}
-              icon={AlertTriangle}
-              trend="Derniers 7j"
-            />
-            <StatCard
-              title="Avancement Site"
-              value={projects.find(p => p.name === technicianProject)?.progress.toString() || "0"}
-              unit="%"
-              change=""
-              isPositive={true}
-              icon={TrendingUp}
-              trend="Progression"
-            />
-          </>
-        )}
+
       </div>
+
+      {role === 'Directeur technique' && (
+        <PendingApprovalsPanel
+          initialData={backendKpis?.pendingApprovals ?? null}
+          onUpdated={handlePendingApprovalsUpdated}
+        />
+      )}
 
       {/* Main Charts Section */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {(role === 'Directeur_technique' || role === 'Chef_chantier') ? (
+        {role === 'Directeur technique' ? (
           <Card className="lg:col-span-2 p-8 border-none shadow-xl shadow-slate-200/50">
             <div className="flex items-center justify-between mb-8">
               <div>
@@ -751,9 +699,9 @@ const { can } = usePermissions();
                   <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: 'currentColor', fontSize: 10, fontWeight: 600, opacity: 0.5 }} />
                   <YAxis axisLine={false} tickLine={false} tick={{ fill: 'currentColor', fontSize: 10, fontWeight: 600, opacity: 0.5 }} tickFormatter={(value) => `${value / 1000000}M`} />
                   <Tooltip
-                    contentStyle={{ 
-                      borderRadius: '16px', 
-                      border: 'none', 
+                    contentStyle={{
+                      borderRadius: '16px',
+                      border: 'none',
                       boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)',
                       backgroundColor: 'rgb(var(--color-bg-rgb, 255, 255, 255))',
                       color: 'inherit'
@@ -777,272 +725,54 @@ const { can } = usePermissions();
               </ResponsiveContainer>
             </div>
           </Card>
-        ) : role === 'RH' ? (
-          <Card className="lg:col-span-2 p-8 border-none shadow-xl shadow-slate-200/50">
-            <div className="flex items-center justify-between mb-8">
-              <div>
-                <h3 className="text-xl font-black text-slate-900 tracking-tight">{t('dashboard.staff_evolution')}</h3>
-                <p className="text-sm text-slate-500 font-medium">{t('dashboard.staff_monthly')}</p>
-              </div>
-            </div>
-            <div className="h-[350px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={allMonths.map((m, i) => {
-                  const currentYear = new Date().getFullYear();
-                  const count = employees.filter(e => {
-                    if (!e.dateEmbauche) return false;
-                    const d = new Date(e.dateEmbauche);
-                    return d.getFullYear() < currentYear || (d.getFullYear() === currentYear && d.getMonth() <= i);
-                  }).length;
-                  return { name: m, count: count || 0 };
-                })}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="currentColor" opacity={0.1} />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: 'currentColor', fontSize: 10, fontWeight: 600, opacity: 0.5 }} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fill: 'currentColor', fontSize: 10, fontWeight: 600, opacity: 0.5 }} />
-                  <Tooltip contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} />
-                  <Bar dataKey="count" fill="var(--color-primary)" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </Card>
-        ) : (
-          <div className="lg:col-span-2 space-y-6">
-            <Card className="p-8 border-none shadow-xl shadow-slate-200/50">
-              <div className="flex items-center justify-between mb-8">
-                <div>
-                  <h3 className="text-xl font-black text-slate-900 tracking-tight">{t('dashboard.my_checklists')}</h3>
-                  <p className="text-sm text-slate-500 font-medium">{t('dashboard.site_tracking')}</p>
-                </div>
-                <div className="flex items-center gap-2 px-3 py-1 bg-blue-50 text-blue-600 rounded-full">
-                  <Building2 className="w-3 h-3" />
-                  <span className="text-[10px] font-black uppercase tracking-widest">{technicianProject}</span>
-                </div>
-              </div>
-              <div className="space-y-6 max-h-[400px] overflow-y-auto pr-2">
-                {technicianChecklists.length > 0 ? technicianChecklists.map((checklist) => (
-                  <div key={checklist.id} className="space-y-3">
-                    <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                      <h4 className="text-sm font-black text-slate-800">{checklist.title}</h4>
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{checklist.date}</span>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      {checklist.tasks.map((task) => (
-                        <div
-                          key={task.id}
-                          className={cn(
-                            "flex items-center justify-between p-3 rounded-xl border transition-all cursor-pointer",
-                            task.completed ? "bg-emerald-50 border-emerald-100" : "bg-white border-slate-100 hover:border-[var(--color-primary)]"
-                          )}
-                          onClick={() => toggleChecklistTask(checklist.id, task.id)}
-                        >
-                          <div className="flex items-center gap-3">
-                            <div className={cn(
-                              "w-5 h-5 rounded-md border-2 flex items-center justify-center transition-all",
-                              task.completed ? "bg-emerald-500 border-emerald-500" : "border-slate-300 bg-white"
-                            )}>
-                              {task.completed && <CheckCircle2 className="w-3.5 h-3.5 text-white" />}
-                            </div>
-                            <span className={cn(
-                              "text-xs font-bold transition-colors",
-                              task.completed ? "text-emerald-700 line-through" : "text-slate-700"
-                            )}>{task.title}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )) : (
-                  <div className="py-20 text-center">
-                    <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4">
-                      <CheckCircle2 className="w-8 h-8 text-slate-200" />
-                    </div>
-                    <p className="text-slate-400 font-bold">{t('dashboard.no_checklist')}</p>
-                  </div>
-                )}
-              </div>
-            </Card>
+        ) : null}
 
-            <Card className="p-8 bg-slate-900 text-white border-none shadow-2xl shadow-blue-900/20">
-              <div className="flex items-center justify-between mb-8">
-                <h3 className="text-xl font-black tracking-tight flex items-center gap-2">
-                  <AlertTriangle className="w-6 h-6 text-yellow-500" />
-                  {t('dashboard.alerts')}
-                </h3>
-                <span className="bg-red-500 text-white text-[10px] font-black px-2 py-1 rounded-full animate-pulse">{criticalIncidents} CRITIQUES</span>
-              </div>
-              <div className="space-y-4">
-                {/* Dynamic Alerts from Projects (80% budget consumption) */}
-                {filteredSourceProjects.map(p => {
-                  const budget = Math.round(Number(p.budget)) || 0;
-                  const projectExpenses = Math.abs(filteredSourceTransactions
-                    .filter(t => t.projectId === p.id && t.type === 'expense')
-                    .reduce((sum, t) => sum + t.amount, 0));
-
-                  if (budget > 0 && projectExpenses >= budget * 0.8) {
-                    return (
-                      <AlertItem
-                        key={`alert-budget-${p.id}`}
-                        type="danger"
-                        title="Alerte Budget (80%)"
-                        desc={`${p.name} - Consommation: ${new Intl.NumberFormat('fr-FR').format(projectExpenses)} FCFA`}
-                        onClick={() => setSelectedAlert({
-                          title: 'Alerte Budget (80%)',
-                          chantier: p.name,
-                          budget: new Intl.NumberFormat('fr-FR').format(budget) + ' FCFA',
-                          depenses: new Intl.NumberFormat('fr-FR').format(projectExpenses) + ' FCFA',
-                          ratio: Math.round((projectExpenses / budget) * 100) + '%'
-                        })}
-                      />
-                    );
-                  }
-                  return null;
-                })}
-
-                {/* Dynamic Alerts from Incidents */}
-                {filteredSourceIncidents.slice(0, 4).map(incident => (
-                  <AlertItem
-                    key={`alert-incident-${incident.id}`}
-                    type={incident.gravity === 'Critique' ? 'danger' : 'warning'}
-                    title={`Incident: ${incident.type}`}
-                    desc={`${projects.find(p => p.id === incident.projectId)?.name || 'Chantier inconnu'} - ${incident.desc}`}
-                    onClick={() => setSelectedAlert({
-                      title: `Incident ${incident.gravity}`,
-                      chantier: projects.find(p => p.id === incident.projectId)?.name || 'Chantier inconnu',
-                      gravite: incident.gravity,
-                      description: incident.desc,
-                      date: incident.date,
-                      statut: incident.status
-                    })}
-                  />
-                ))}
-
-                {/* Alertes de Sécurité */}
-                {filteredSourceIncidents.filter(i => i.gravity === 'Critique').length === 0 && filteredSourceProjects.length > 0 && (
-                  <AlertItem
-                    type="success"
-                    title="Sécurité OK"
-                    desc="Aucun incident critique sur les chantiers actifs"
-                    onClick={() => {}}
-                  />
-                )}
-
-                {/* Alertes de Production */}
-                {filteredSourceProjects.filter(p => p.status === 'Actif').length > 0 && (
-                  <AlertItem
-                    type="info"
-                    title="Production Active"
-                    desc={`${filteredSourceProjects.filter(p => p.status === 'Actif').length} chantier(s) en cours`}
-                    onClick={() => {}}
-                  />
-                )}
-              </div>
-            </Card>
-          </div>
-        )}
-
-        <Card className={cn("p-8 border-none shadow-xl shadow-slate-200/50 flex flex-col", role === 'Technicien_chantier' && "bg-slate-50")}>
+        <Card className="p-8 border-none shadow-xl shadow-slate-200/50 flex flex-col">
           <h3 className="text-xl font-black text-slate-900 tracking-tight mb-2">
-            {(role === 'Directeur_technique' || role === 'Chef_chantier') ? 'Structure des Coûts' :
-              role === 'RH' ? 'Répartition par Poste' :
-                'Historique des tâches'}
+            {(role === 'Directeur technique') ? 'Structure des Couts' : 'Répartition par Poste'}
           </h3>
           <p className="text-sm text-slate-500 font-medium mb-8">
-            {(role === 'Directeur_technique' || role === 'Chef_chantier') ? 'Répartition par poste de dépense' :
-              role === 'RH' ? 'Répartition des effectifs par catégorie' :
-                'Tâches assignées par le chef chantier'}
+            {(role === 'Directeur technique') ? 'Répartition par poste de dépense' : 'Répartition des effectifs par catégorie'}
           </p>
-          {role === 'Technicien_chantier' ? (
-            <div className="flex-1 space-y-4">
-              {technicianTasks.length > 0 ? technicianTasks.map((task, i) => (
-                <div key={i} className="flex items-center gap-4 p-4 bg-white rounded-2xl border border-slate-100 shadow-sm">
-                  <div className="w-10 h-10 bg-purple-50 rounded-xl flex items-center justify-center text-purple-600">
-                    <HardHat className="w-5 h-5" />
-                  </div>
-                  <div className="flex-1">
-                    <p className="text-sm font-black text-slate-900">{task.title}</p>
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                      {task.status === 'À faire' ? 'À faire' : 
-                       task.status === 'En cours' ? 'En cours' : 
-                       task.status === 'Terminé' ? 'Terminé' : 'Bloqué'}
-                    </p>
-                    {task.dueDate && (
-                      <p className="text-[10px] text-slate-500 mt-1">
-                        Échéance : {new Date(task.dueDate).toLocaleDateString('fr-FR')}
-                      </p>
-                    )}
-                  </div>
-                  <div className="w-2 h-2 rounded-full bg-purple-400"></div>
-                </div>
-              )) : (
-                <p className="text-center py-10 text-slate-400 text-xs font-bold italic">{t('dashboard.no_task')}</p>
-              )}
-            </div>
-          ) : (
-            <div className="flex-1 flex flex-col items-center justify-center">
-              <div className="h-[240px] w-full relative">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={(role === 'Directeur_technique' || role === 'Chef_chantier') ? pieDataWithPercentage :
-                        role === 'RH' ? (() => {
-                          const roles = Array.from(new Set(employees.map(e => e.role || 'Autre')));
-                          return roles.map(r => ({
-                            name: r,
-                            value: employees.filter(e => e.role === r).length
-                          }));
-                        })() : [
-                          { name: 'Pelles Hydrauliques', value: 40 },
-                          { name: 'Bulldozers', value: 30 },
-                          { name: 'Camions Benne', value: 20 },
-                          { name: 'Compacteurs', value: 10 },
-                        ]}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={70}
-                      outerRadius={100}
-                      paddingAngle={8}
-                      dataKey="value"
-                    >
-                      {((role === 'Directeur_technique' || role === 'Chef_chantier') ? pieDataWithPercentage : [1, 2, 3, 4]).map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <Tooltip />
-                  </PieChart>
-                </ResponsiveContainer>
-                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                  <span className="text-3xl font-black text-slate-900">100%</span>
-                  <span className="text-[10px] uppercase font-bold text-slate-400 tracking-widest">
-                    {(role === 'Directeur_technique' || role === 'Chef_chantier') ? 'Total Coûts' :
-                      role === 'RH' ? 'Total Personnel' :
-                        'Taux d\'Usage'}
-                  </span>
-                </div>
+          <div className="flex-1 flex flex-col items-center justify-center">
+            <div className="h-[240px] w-full relative">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={pieDataWithPercentage}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={70}
+                    outerRadius={100}
+                    paddingAngle={8}
+                    dataKey="value"
+                  >
+                    {pieDataWithPercentage.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                <span className="text-3xl font-black text-slate-900">100%</span>
+                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-widest">
+                  {t('dashboard.total_costs')}
+                </span>
               </div>
-              <div className="w-full space-y-3 mt-8">
-                {((role === 'Directeur_technique' || role === 'Chef_chantier') ? pieDataWithPercentage :
-                  role === 'RH' ? [
-                    { name: 'Encadrement', value: 15 },
-                    { name: 'Technique', value: 35 },
-                    { name: 'Ouvriers', value: 40 },
-                    { name: 'Support', value: 10 },
-                  ] : [
-                    { name: 'Pelles Hydrauliques', value: 40 },
-                    { name: 'Bulldozers', value: 30 },
-                    { name: 'Camions Benne', value: 20 },
-                    { name: 'Compacteurs', value: 10 },
-                  ]).map((item, i) => (
-                    <div key={item.name} className="flex items-center justify-between p-2 rounded-xl hover:bg-slate-50 transition-colors">
-                      <div className="flex items-center gap-3">
-                        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: COLORS[i] }}></div>
-                        <span className="text-sm text-slate-700 font-bold">{item.name}</span>
-                      </div>
-                      <span className="text-sm font-black text-slate-900">{item.value}%</span>
+            </div>
+            <div className="w-full space-y-3 mt-8">
+              {pieDataWithPercentage.map((item, i) => (
+                  <div key={item.name || `pie-legend-${i}`} className="flex items-center justify-between p-2 rounded-xl hover:bg-slate-50 transition-colors">
+                    <div className="flex items-center gap-3">
+                      <div className="w-3 h-3 rounded-full" style={{ backgroundColor: COLORS[i] }}></div>
+                      <span className="text-sm text-slate-700 font-bold">{item.name}</span>
                     </div>
-                  ))}
-              </div>
+                    <span className="text-sm font-black text-slate-900">{item.value}%</span>
+                  </div>
+                ))}
             </div>
-          )}
+          </div>
         </Card>
       </div>
 
@@ -1085,8 +815,14 @@ const { can } = usePermissions();
         </Card>
 
         {/* {t('dashboard.alerts')} Card - Uniquement pour DG et Chef */}
-        {(role === 'Directeur_technique' || role === 'Chef_chantier') && (
-          <Card className="p-8 bg-slate-900 text-white border-none shadow-2xl shadow-blue-900/20">
+        {(role === 'Directeur technique') && (
+          <Card
+            id="business-alerts"
+            className={cn(
+              'p-8 bg-slate-900 text-white border-none shadow-2xl shadow-blue-900/20 scroll-mt-6 transition-shadow duration-500',
+              alertsHighlight && 'ring-4 ring-yellow-400/80 ring-offset-2 ring-offset-slate-100',
+            )}
+          >
             <div className="flex items-center justify-between mb-8">
               <h3 className="text-xl font-black tracking-tight flex items-center gap-2">
                 <AlertTriangle className="w-6 h-6 text-yellow-500" />
@@ -1128,16 +864,8 @@ const { can } = usePermissions();
                   key={`alert-incident-${incident.id}`}
                   type={incident.gravity === 'Critique' ? 'danger' : 'warning'}
                   title={`Incident: ${incident.type}`}
-                  desc={`${projects.find(p => p.id === incident.projectId)?.name || 'Chantier inconnu'} - ${incident.desc}`}
-                  onClick={() => setSelectedAlert({
-                    title: `Incident ${incident.gravity}`,
-                    chantier: projects.find(p => p.id === incident.projectId)?.name || 'Chantier inconnu',
-                    type: incident.type,
-                    description: incident.description,
-                    date: incident.date,
-                    statut: incident.status,
-                    image: incident.image
-                  })}
+                  desc={`${visibleProjects.find(p => p.id === incident.projectId)?.name || 'Chantier inconnu'} - ${incident.desc}`}
+                  onClick={() => openIncidentAlertDetail(incident)}
                 />
               ))}
 
@@ -1163,29 +891,27 @@ const { can } = usePermissions();
 
       {/* Drill Down Modal Simulation */}
       <AnimatePresence>
-        {selectedAlert && (
+        {selectedAlert && (() => {
+          const selectedAlertImages = getIncidentImagesFromRecord(selectedAlert);
+          return (
           <Modal
             isOpen={!!selectedAlert}
             onClose={() => setSelectedAlert(null)}
-            title={`Détail Alerte: ${selectedAlert.title}`}
+            title={t('dashboard.modals.alert_detail', { title: selectedAlert.title })}
             size="lg"
           >
             <div className="space-y-6">
               <div className="p-6 bg-slate-50 rounded-3xl border border-slate-100">
                 <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-6">{t('dashboard.critical_analysis')}</h4>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  {Object.entries(selectedAlert).filter(([k]) => k !== 'title' && k !== 'image').map(([key, value]: any) => {
-                    const labels: Record<string, string> = {
-                      chantier: 'Chantier',
-                      budget: 'Budget Total',
-                      depenses: 'Dépenses Actuelles',
-                      ratio: 'Taux de Consommation',
-                      type: 'Nature de l\'incident',
-                      description: 'Description',
-                      date: 'Date du rapport',
-                      statut: 'Statut actuel'
-                    };
-                    const label = labels[key] || key.charAt(0).toUpperCase() + key.slice(1);
+                  {Object.entries(selectedAlert).filter(([k, v]) => (
+                    k && k !== 'title' && k !== 'image' && k !== 'images' && k !== 'incidentId'
+                    && v != null && v !== '' && !Array.isArray(v)
+                  )).map(([key, value]: any) => {
+                    const alertFieldKeys = ['chantier', 'budget', 'depenses', 'ratio', 'type', 'description', 'date', 'statut'];
+                    const label = alertFieldKeys.includes(key)
+                      ? t(`dashboard.modals.alert_fields.${key}`)
+                      : key.charAt(0).toUpperCase() + key.slice(1);
 
                     return (
                       <div key={key} className={cn("space-y-1", key === 'description' && "col-span-full")}>
@@ -1195,66 +921,64 @@ const { can } = usePermissions();
                     );
                   })}
 
-                  {selectedAlert.image && (
+                  {selectedAlertImages.length > 0 && (
                     <div className="col-span-full mt-4">
-                      <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Preuve Photo</p>
-                      <img 
-                        src={selectedAlert.image.startsWith('http') ? selectedAlert.image : `${import.meta.env.VITE_API_URL || ''}${selectedAlert.image}`} 
-                        alt="Preuve" 
-                        className="w-full max-h-96 object-contain rounded-2xl border border-slate-100" 
-                        referrerPolicy="no-referrer" 
+                      <ReportPhotos
+                        images={selectedAlertImages}
+                        reportId={selectedAlert.incidentId ?? selectedAlert.title ?? 'alert'}
                       />
                     </div>
                   )}
                 </div>
               </div>
 
-              {(role === 'Directeur_technique' || role === 'Chef_chantier') && (
-              <div className="space-y-3">
-                <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest">Actions de Remédiation Immédiates</h4>
-                <Button
-                  className="w-full justify-between group h-14 rounded-2xl"
-                  onClick={() => {
-                    setIsConvoquerModalOpen(true);
-                    setSelectedAlert(null);
-                  }}
-                >
-                  <span>Convoquer le Conducteur de Travaux</span>
-                  <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                </Button>
-                <Button
-                  variant="outline"
-                  className="w-full justify-between group h-14 rounded-2xl border-slate-200"
-                  onClick={() => {
-                    setIsIncidentModalOpen(true);
-                    setSelectedAlert(null);
-                  }}
-                >
-                  <span>Générer un rapport d'incident pour le Client</span>
-                  <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="w-full text-red-500 hover:bg-red-50 font-bold h-14 rounded-2xl"
-                  onClick={() => {
-                    setIsEscaladerModalOpen(true);
-                    setSelectedAlert(null);
-                  }}
-                >
-                  Escalader au Comité de Direction
-                </Button>
-              </div>
-            )}
+              {(role === 'Directeur technique') && (
+                <div className="space-y-3">
+                  <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest">Actions de Remédiation Immédiates</h4>
+                  <Button
+                    className="w-full justify-between group h-14 rounded-2xl"
+                    onClick={() => {
+                      setIsConvoquerModalOpen(true);
+                      setSelectedAlert(null);
+                    }}
+                  >
+                    <span>Convoquer le Conducteur de Travaux</span>
+                    <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="w-full justify-between group h-14 rounded-2xl border-slate-200"
+                    onClick={() => {
+                      setIsIncidentModalOpen(true);
+                      setSelectedAlert(null);
+                    }}
+                  >
+                    <span>Générer un rapport d'incident pour le Client</span>
+                    <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="w-full text-red-500 hover:bg-red-50 font-bold h-14 rounded-2xl"
+                    onClick={() => {
+                      setIsEscaladerModalOpen(true);
+                      setSelectedAlert(null);
+                    }}
+                  >
+                    Escalader au Comité de Direction
+                  </Button>
+                </div>
+              )}
             </div>
           </Modal>
-        )}
+          );
+        })()}
 
         {/* Alert Center Modal */}
         {isAlertCenterModalOpen && (
           <Modal
             isOpen={isAlertCenterModalOpen}
             onClose={() => setIsAlertCenterModalOpen(false)}
-            title="Centre d'{t('dashboard.alerts')} & Historique"
+            title={t('dashboard.modals.alert_center')}
             size="lg"
           >
             <div className="space-y-6">
@@ -1266,7 +990,7 @@ const { can } = usePermissions();
                     alertCenterTab === 'active' ? "bg-white shadow-sm text-[var(--color-primary)]" : "text-slate-500 hover:text-slate-700"
                   )}
                 >
-                  Alertes Actives
+                  {t('dashboard.modals.active_alerts')}
                 </button>
                 <button
                   onClick={() => setAlertCenterTab('history')}
@@ -1275,7 +999,7 @@ const { can } = usePermissions();
                     alertCenterTab === 'history' ? "bg-white shadow-sm text-[var(--color-primary)]" : "text-slate-500 hover:text-slate-700"
                   )}
                 >
-                  Historique / Fermées
+                  {t('dashboard.modals.history_closed')}
                 </button>
               </div>
 
@@ -1311,7 +1035,14 @@ const { can } = usePermissions();
 
                     {/* Active Incidents */}
                     {incidents.filter(i => i.status !== 'Fermé').map(incident => (
-                      <div key={`center-incident-${incident.id}`} className="p-4 bg-white border border-slate-100 rounded-2xl space-y-4">
+                      <div
+                        key={`center-incident-${incident.id}`}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => openIncidentAlertDetail(incident)}
+                        onKeyDown={(e) => e.key === 'Enter' && openIncidentAlertDetail(incident)}
+                        className="p-4 bg-white border border-slate-100 rounded-2xl space-y-4 cursor-pointer hover:border-[var(--color-primary)]/40 hover:shadow-md transition-all"
+                      >
                         <div className="flex justify-between items-start">
                           <div className="flex items-center gap-2">
                             <div className={cn(
@@ -1322,7 +1053,7 @@ const { can } = usePermissions();
                             </div>
                             <div>
                               <p className="text-sm font-black text-slate-900">{incident.title}</p>
-                              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{projects.find(p => p.id === incident.projectId)?.name || 'Chantier inconnu'} • {incident.type}</p>
+                              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{visibleProjects.find(p => p.id === incident.projectId)?.name || 'Chantier inconnu'} • {incident.type}</p>
                             </div>
                           </div>
                           <span className={cn(
@@ -1333,15 +1064,11 @@ const { can } = usePermissions();
                           </span>
                         </div>
 
-                        {/* Afficher l'image si disponible */}
-                        {incident.image && (
+                        {getIncidentImagesFromRecord(incident).length > 0 && (
                           <div className="pt-4 border-t border-slate-50">
-                            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Preuve Photo</p>
-                            <img 
-                              src={incident.image.startsWith('http') ? incident.image : `${import.meta.env.VITE_API_URL || ''}${incident.image}`} 
-                              alt="Preuve incident" 
-                              className="w-full max-h-96 object-contain rounded-xl border border-slate-200" 
-                              referrerPolicy="no-referrer" 
+                            <ReportPhotos
+                              images={getIncidentImagesFromRecord(incident)}
+                              reportId={incident.id}
                             />
                           </div>
                         )}
@@ -1374,23 +1101,19 @@ const { can } = usePermissions();
                             </div>
                             <div>
                               <p className="text-sm font-black text-slate-900">{incident.title}</p>
-                              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{projects.find(p => p.id === incident.projectId)?.name || 'Chantier inconnu'} • {incident.type}</p>
+                              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{visibleProjects.find(p => p.id === incident.projectId)?.name || 'Chantier inconnu'} • {incident.type}</p>
                             </div>
                           </div>
                           <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md bg-slate-200 text-slate-600">
-                            FERMÉ
+                            FERMé
                           </span>
                         </div>
 
-                        {/* Afficher l'image si disponible */}
-                        {incident.image && (
+                        {getIncidentImagesFromRecord(incident).length > 0 && (
                           <div className="pt-4 border-t border-slate-100">
-                            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Preuve Photo</p>
-                            <img 
-                              src={incident.image.startsWith('http') ? incident.image : `${import.meta.env.VITE_API_URL || ''}${incident.image}`} 
-                              alt="Preuve incident" 
-                              className="w-full max-h-96 object-contain rounded-xl border border-slate-200 opacity-75 grayscale-[0.5]" 
-                              referrerPolicy="no-referrer" 
+                            <ReportPhotos
+                              images={getIncidentImagesFromRecord(incident)}
+                              reportId={incident.id}
                             />
                           </div>
                         )}
@@ -1420,19 +1143,19 @@ const { can } = usePermissions();
               </div>
 
               <div className="pt-6 border-t border-slate-100 flex justify-end">
-                <Button variant="outline" onClick={() => setIsAlertCenterModalOpen(false)} className="font-bold">Fermer le centre</Button>
+                <Button variant="outline" onClick={() => setIsAlertCenterModalOpen(false)} className="font-bold">{t('dashboard.close_center')}</Button>
               </div>
             </div>
           </Modal>
         )}
 
-        
+
         {/* Convoquer Modal */}
         {isConvoquerModalOpen && (
           <Modal
             isOpen={isConvoquerModalOpen}
             onClose={() => setIsConvoquerModalOpen(false)}
-            title="Convoquer le Responsable"
+            title={t('dashboard.modals.summon_title')}
           >
             <div className="space-y-6">
               <div className="p-4 bg-amber-50 rounded-xl border border-amber-100">
@@ -1444,28 +1167,28 @@ const { can } = usePermissions();
               </div>
               <div className="space-y-1.5">
                 <label className="text-sm font-bold text-slate-700">Message / Instructions</label>
-                <textarea className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm h-32 outline-none focus:ring-2 focus:ring-[var(--color-primary)]" placeholder="Détaillez les points à aborder..."></textarea>
+                <textarea className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm h-32 outline-none focus:ring-2 focus:ring-[var(--color-primary)]" placeholder="Détaillez les points Ã  aborder..."></textarea>
               </div>
               <div className="flex flex-col sm:flex-row sm:justify-end gap-3">
                 <Button variant="outline" onClick={() => setIsConvoquerModalOpen(false)} disabled={isSubmitting}>{t('common.cancel')}</Button>
-                <Button 
+                <Button
                   onClick={async () => {
                     setIsSubmitting(true);
                     try {
                       await new Promise(r => setTimeout(r, 1000)); // Simulate API
                       setIsConvoquerModalOpen(false);
-                      notify("Convocation envoyée", "success");
+                      notify(t('dashboard.notifications.convocation_sent'), "success");
                     } finally {
                       setIsSubmitting(false);
                     }
-                  }} 
+                  }}
                   className="font-bold shadow-lg shadow-blue-900/20"
                   disabled={isSubmitting}
                 >
                   {isSubmitting ? (
                     <>
                       <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                      Traitement...
+                      {t('common.modals.processing')}
                     </>
                   ) : (
                     'Envoyer la Convocation'
@@ -1481,7 +1204,7 @@ const { can } = usePermissions();
           <Modal
             isOpen={isIncidentModalOpen}
             onClose={() => setIsIncidentModalOpen(false)}
-            title="Générer un Rapport d'Incident"
+            title={t('dashboard.modals.incident_report_title')}
             size="lg"
           >
             <div className="space-y-6">
@@ -1513,24 +1236,24 @@ const { can } = usePermissions();
               </div>
               <div className="flex flex-col sm:flex-row sm:justify-end gap-3">
                 <Button variant="outline" onClick={() => setIsIncidentModalOpen(false)} disabled={isSubmitting}>{t('common.cancel')}</Button>
-                <Button 
+                <Button
                   onClick={async () => {
                     setIsSubmitting(true);
                     try {
                       await new Promise(r => setTimeout(r, 1000)); // Simulate API
                       setIsIncidentModalOpen(false);
-                      notify("Rapport généré", "success");
+                      notify(t('dashboard.notifications.report_generated'), "success");
                     } finally {
                       setIsSubmitting(false);
                     }
-                  }} 
+                  }}
                   className="font-bold shadow-lg shadow-blue-900/20"
                   disabled={isSubmitting}
                 >
                   {isSubmitting ? (
                     <>
                       <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                      Traitement...
+                      {t('common.modals.processing')}
                     </>
                   ) : (
                     'Générer le Rapport'
@@ -1546,25 +1269,25 @@ const { can } = usePermissions();
           <Modal
             isOpen={isEscaladerModalOpen}
             onClose={() => setIsEscaladerModalOpen(false)}
-            title="Escalader au Comité de Direction"
+            title={t('dashboard.modals.escalate_title')}
           >
             <div className="space-y-6 text-center py-4">
               <div className="w-16 h-16 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4">
                 <AlertTriangle className="w-8 h-8" />
               </div>
               <h4 className="text-xl font-black text-slate-900 tracking-tight">Confirmer l'escalade</h4>
-              <p className="text-sm text-slate-500 font-medium">Cette action enverra une alerte critique à tous les membres du CODIR.</p>
+              <p className="text-sm text-slate-500 font-medium">Cette action enverra une alerte critique Ã  tous les membres du CODIR.</p>
               <div className="pt-6 border-t border-slate-100 flex justify-center gap-3">
                 <Button variant="outline" onClick={() => setIsEscaladerModalOpen(false)} disabled={isSubmitting}>{t('common.cancel')}</Button>
-                <Button 
-                  className="font-bold bg-red-600 hover:bg-red-700 text-white border-none shadow-lg shadow-red-900/20" 
+                <Button
+                  className="font-bold bg-red-600 hover:bg-red-700 text-white border-none shadow-lg shadow-red-900/20"
                   disabled={isSubmitting}
                   onClick={async () => {
                     setIsSubmitting(true);
                     try {
                       await new Promise(r => setTimeout(r, 1000)); // Simulate API
                       setIsEscaladerModalOpen(false);
-                      notify("Alerte escaladée au CODIR", "error");
+                      notify(t('dashboard.notifications.escalation_sent'), "error");
                     } finally {
                       setIsSubmitting(false);
                     }
@@ -1573,7 +1296,7 @@ const { can } = usePermissions();
                   {isSubmitting ? (
                     <>
                       <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                      Traitement...
+                      {t('common.modals.processing')}
                     </>
                   ) : (
                     "Confirmer l'Escalade"
@@ -1589,7 +1312,7 @@ const { can } = usePermissions();
           <Modal
             isOpen={isRegionFilterOpen}
             onClose={() => setIsRegionFilterOpen(false)}
-            title="Analyse de Performance Régionale"
+            title={t('dashboard.modals.region_analysis')}
             size="lg"
           >
             <div className="space-y-6">
@@ -1638,7 +1361,7 @@ const { can } = usePermissions();
           <Modal
             isOpen={isProjectFilterOpen}
             onClose={() => setIsProjectFilterOpen(false)}
-            title="Filtrer par Chantier"
+            title={t('dashboard.modals.filter_project')}
           >
             <div className="space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1652,7 +1375,7 @@ const { can } = usePermissions();
                   <h4 className="text-xl font-black text-slate-900 mb-1">{t('dashboard.all_projects')}</h4>
                   <p className="text-xs font-bold text-slate-500">Vue consolidée de l'entreprise</p>
                 </button>
-                {projects.map((project) => (
+                {visibleProjects.map((project) => (
                   <button
                     key={project.id}
                     onClick={() => { setSelectedProject(project.id); setIsProjectFilterOpen(false); }}
@@ -1687,7 +1410,7 @@ const { can } = usePermissions();
           <Modal
             isOpen={isExportModalOpen}
             onClose={() => setIsExportModalOpen(false)}
-            title="Générateur de Rapport Mensuel DG"
+            title={t('dashboard.modals.export_wizard_title')}
           >
             <div className="space-y-8">
               {/* Stepper */}
@@ -1706,9 +1429,9 @@ const { can } = usePermissions();
               {exportStep === 1 && (
                 <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
                   <h4 className="text-lg font-black text-slate-900">1. Sélection des Modules</h4>
-                  <p className="text-sm text-slate-500 font-medium">Cochez les sections à inclure dans le rapport consolidé.</p>
+                  <p className="text-sm text-slate-500 font-medium">Cochez les sections Ã  inclure dans le rapport consolidé.</p>
                   <div className="space-y-3">
-                    {['Performance Financière (Facturation, Marges, AIR)', 'État d\'Avancement des Chantiers', 'Gestion des Ressources (RH & Matériel)', 'Analyse des Risques & Alertes'].map((module) => (
+                    {['Performance Financière (Facturation, Marges, AIR)', 'état d\'Avancement des Chantiers', 'Gestion des Ressources (RH & Matériel)', 'Analyse des Risques & Alertes'].map((module) => (
                       <label key={module} className="flex items-center p-4 bg-slate-50 rounded-xl cursor-pointer hover:bg-slate-100 transition-colors">
                         <input type="checkbox" defaultChecked className="w-5 h-5 rounded border-slate-300 text-[var(--color-primary)] focus:ring-[var(--color-primary)] mr-4" />
                         <span className="text-sm font-bold text-slate-700">{module}</span>
@@ -1753,18 +1476,18 @@ const { can } = usePermissions();
                   <div className="w-20 h-20 bg-emerald-50 text-emerald-500 rounded-full flex items-center justify-center mx-auto mb-6">
                     <CheckCircle2 className="w-10 h-10" />
                   </div>
-                  <h4 className="text-2xl font-black text-slate-900">Rapport Prêt !</h4>
+                  <h4 className="text-2xl font-black text-slate-900">Rapport Pret !</h4>
                   <p className="text-slate-500 font-medium max-w-xs mx-auto">Le rapport mensuel consolidé a été généré avec succès et téléchargé.</p>
                 </div>
               )}
 
               <div className="pt-6 border-t border-slate-100 flex justify-between">
                 <Button variant="ghost" onClick={() => exportStep > 1 ? setExportStep(exportStep - 1) : setIsExportModalOpen(false)} disabled={isExporting}>
-                  {exportStep === 1 ? 'Annuler' : 'Précédent'}
+                  {exportStep === 1 ? t('common.cancel') : t('common.modals.previous')}
                 </Button>
                 {exportStep === 1 && (
                   <Button onClick={() => setExportStep(2)} className="px-8 font-bold">
-                    Suivant <ChevronRight className="w-4 h-4 ml-2" />
+                    {t('common.next')} <ChevronRight className="w-4 h-4 ml-2" />
                   </Button>
                 )}
                 {exportStep === 2 && (
@@ -1772,10 +1495,10 @@ const { can } = usePermissions();
                     {isExporting ? (
                       <>
                         <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                        Traitement...
+                        {t('common.modals.processing')}
                       </>
                     ) : (
-                      'Générer et Télécharger'
+                      t('common.modals.generate_download')
                     )}
                   </Button>
                 )}
@@ -1792,7 +1515,9 @@ const { can } = usePermissions();
           <Modal
             isOpen={!!activeDeepDive}
             onClose={() => setActiveDeepDive(null)}
-            title={`Analyse Détaillée: ${activeDeepDive === 'ca' ? t('dashboard.invoice_amount') : activeDeepDive === 'expenses' ? t('dashboard.charts.expenses') : activeDeepDive === 'margin' ? t('dashboard.stats.net_margin') : t('projects.title')}`}
+            title={t('dashboard.modals.deep_dive_title', {
+              label: activeDeepDive === 'ca' ? t('dashboard.invoice_amount') : activeDeepDive === 'expenses' ? t('dashboard.charts.expenses') : activeDeepDive === 'margin' ? t('dashboard.stats.net_margin') : t('projects.title')
+            })}
             size="lg"
           >
             <div className="space-y-8">
@@ -1835,7 +1560,7 @@ const { can } = usePermissions();
                     {activeDeepDive === 'ca' ?
                       `Le montant facturé total de ${formattedCA} FCFA est réparti sur ${filteredSourceProjects.length} chantiers actifs.` :
                       activeDeepDive === 'expenses' ?
-                        `Les dépenses engagées s'élèvent à ${formattedExpenses} FCFA, principalement concentrées sur les matériaux.` :
+                        `Les dépenses engagées s'élèvent Ã  ${formattedExpenses} FCFA, principalement concentrées sur les matériaux.` :
                         `La trésorerie nette actuelle est de ${formattedMargin} FCFA après déduction de toutes les dépenses validées.`
                     }
                   </li>
@@ -1849,53 +1574,6 @@ const { can } = usePermissions();
         )}
       </AnimatePresence>
 
-      {/* Floating Action Button for Attendance (Technicien uniquement) */}
-      {role === 'Technicien_chantier' && (
-        <motion.div 
-          initial={{ scale: 0, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          className="fixed bottom-8 right-8 z-50"
-        >
-          <div className="relative group">
-            <Button
-              onClick={handleClockAction}
-              disabled={isClocking || (todayAttendance?.arrivalTime && todayAttendance?.departureTime)}
-              className={cn(
-                "w-16 h-16 rounded-full shadow-2xl flex flex-col items-center justify-center p-0 transition-all hover:scale-110",
-                !todayAttendance?.arrivalTime ? "bg-emerald-600 hover:bg-emerald-700" : 
-                !todayAttendance?.departureTime ? "bg-red-600 hover:bg-red-700" : 
-                "bg-slate-400 opacity-50 cursor-not-allowed text-white"
-              )}
-            >
-              {isClocking ? (
-                <div className="animate-spin w-6 h-6 border-2 border-white border-t-transparent rounded-full" />
-              ) : (
-                <>
-                  <span className="text-white font-black text-[10px] uppercase leading-none">
-                    {!todayAttendance?.arrivalTime ? 'Arrivée' : 'Départ'}
-                  </span>
-                  <div className="w-4 h-0.5 bg-white/30 my-1"></div>
-                  <Clock className="w-4 h-4 text-white" />
-                </>
-              )}
-            </Button>
-            
-            {/* Badge Tooltip */}
-            <div className="absolute bottom-full right-0 mb-4 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-              <div className="bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest px-4 py-2 rounded-xl whitespace-nowrap shadow-xl">
-                {!todayAttendance?.arrivalTime ? "Pointer mon Arrivée" : 
-                 !todayAttendance?.departureTime ? `Arrivé à ${todayAttendance.arrivalTime} • Pointer Départ` : 
-                 "Pointage du jour complété"}
-              </div>
-            </div>
-
-            {/* Pulsing indicator if not clocked in */}
-            {!todayAttendance?.arrivalTime && (
-              <div className="absolute inset-0 rounded-full bg-emerald-500 animate-ping opacity-25 -z-10" />
-            )}
-          </div>
-        </motion.div>
-      )}
     </div>
   );
 };

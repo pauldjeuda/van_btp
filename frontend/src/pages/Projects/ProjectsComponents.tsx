@@ -6,8 +6,8 @@ import React from 'react';
 
 // ─── Utilitaires ─────────────────────────────────────────────────────────────
 
-export const calculateTimeRemaining = (endDate: string): string => {
-  if (!endDate) return '142 Jours'; // Valeur par défaut
+export const calculateTimeRemaining = (endDate: string, t: any): string => {
+  if (!endDate) return `142 ${t('common.days')}`; // Valeur par défaut
   
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -19,11 +19,11 @@ export const calculateTimeRemaining = (endDate: string): string => {
   const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
   
   if (diffDays < 0) {
-    return `${Math.abs(diffDays)} jours de retard`;
+    return t('projects.delays.days_late', { count: Math.abs(diffDays) });
   } else if (diffDays === 0) {
-    return 'Dernier jour';
+    return t('projects.delays.last_day');
   } else {
-    return `${diffDays} jours`;
+    return t('projects.delays.days_remaining', { count: diffDays });
   }
 };
 
@@ -43,7 +43,6 @@ export const formatDateAmendment = (dateStr: string): string => {
 import { useData } from '../../context/DataContext';
 import { useNotification } from '../../context/NotificationContext';
 import { projectService } from '../../services/project.service';
-import { ProjectTasksPanel } from '../../components/project/ProjectTasksPanel';
 import { amendmentService } from '../../services/amendment.service';
 
 

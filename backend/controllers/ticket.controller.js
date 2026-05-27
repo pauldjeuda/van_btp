@@ -7,7 +7,7 @@ exports.getAll = asyncHandler(async (req, res) => {
     if (req.query.status)   where.status   = req.query.status;
     if (req.query.priority) where.priority = req.query.priority;
     // Chaque rôle voit ses propres tickets (sauf DG qui voit tout)
-    if (req.role !== 'Directeur_technique') where.createdBy = req.user.id;
+    if (req.role !== 'Chef_chantier') where.createdBy = req.user.id;
     const tickets = await db.Ticket.findAll({
       where,
       order: [['createdAt', 'DESC']],

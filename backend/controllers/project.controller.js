@@ -6,29 +6,27 @@ const asyncHandler = require('../middlewares/asyncHandler');
 const { Op } = require('sequelize');
 const db = require('../models');
 const { success, created, notFound, error, badRequest } = require('../utils/response');
+const { DEFAULT_BTP_TASKS } = require('../utils/defaultProjectTasks');
+const { ROLE_DG } = require('../utils/roles');
+const {
+  taskFieldsForStageIndex,
+  computeStageFromTasks,
+  computeProgressFromTasks,
+  syncTasksToAdvancementStage,
+} = require('../utils/advancementStage');
+const { resolveChefProjectIds } = require('../utils/chefProjectAccess');
 
 exports.getAll = asyncHandler(async (req, res) => {
     const { role, user } = req;
     const where = {};
 
-    // Chef : uniquement ses chantiers
-    if (role === 'Chef_chantier') where.chefId = user.id;
-
-    // Technicien : chantier de son affectation courante
-    if (role === 'Technicien_chantier') {
-      const matricule = (user.matricule || '').trim().toLowerCase();
-      if (!matricule) return success(res, []);
-
-      // Recherche insensible à la casse
-      const emp = await db.Employee.findOne({ 
-        where: db.sequelize.where(
-          db.sequelize.fn('LOWER', db.sequelize.col('matricule')),
-          matricule
-        )
-      });
-      
-      if (emp?.projectId) where.id = emp.projectId;
-      else return success(res, []);
+    // Chef : chantiers liés (chefId ou fiche employé — réparation auto si besoin)
+    if (role === 'Chef_chantier') {
+      const projectIds = await resolveChefProjectIds(user);
+      if (!projectIds.length) {
+        return success(res, []);
+      }
+      where.id = { [Op.in]: projectIds };
     }
 
     // Filtres query string
@@ -57,42 +55,58 @@ exports.getById = asyncHandler(async (req, res) => {
 });
 
 exports.create = asyncHandler(async (req, res) => {
+    if (req.role !== ROLE_DG) {
+      return error(res, 'Seul le directeur technique peut créer un chantier', 403);
+    }
+
     const {
       code, name, client, budget, location, region, startDate, endDate, status,
       category, subCategory, montantMarche, budgetItems, parentId, manager, progress,
+      chefId, airRate, guaranteeRetention, guaranteeBank,
     } = req.body;
     if (!code || !name || !client) {
       return badRequest(res, 'Le code, le nom et le client sont obligatoires');
     }
+
+    const advancementStage = status || '';
+    const stageIndex = advancementStage
+      ? DEFAULT_BTP_TASKS.indexOf(advancementStage)
+      : -1;
 
     const project = await db.Project.create({
       code, name, client,
       budget:        budget || 0,
       montantMarche: montantMarche || budget || 0,
       location, region, startDate, endDate,
-      status:      status      || 'Planifié',
+      status:      advancementStage,
       category:    category    || 'Autre',
       subCategory: (subCategory && subCategory.trim()) ? subCategory.trim() : null,
       budgetItems: budgetItems || [],
       parentId:    parentId    || null,
       manager:     manager      || null,
-      progress:    progress !== undefined ? Number(progress) : 0,
-      chefId:      req.role === 'Chef_chantier' ? req.user.id : null,
+      airRate: airRate || null,
+      guaranteeRetention: guaranteeRetention || null,
+      guaranteeBank: guaranteeBank || null,
+      progress:    0,
+      chefId:      chefId || null,
     });
 
-    // Auto-affecter le chef comme employé de son chantier
-    if (req.role === 'Chef_chantier' && project.chefId) {
-      await db.Employee.findOrCreate({
-        where: { matricule: req.user.matricule },
-        defaults: {
-          matricule: req.user.matricule,
-          name: `${req.user.prenom || ''} ${req.user.nom || ''}`.trim() || 'Chef de chantier',
-          role: 'Chef_chantier',
-          projectId: project.id,
-          contract: 'CDI'
-        }
-      });
-    }
+    // Tâches génériques BTP par défaut + état d'avancement initial
+    const taskRows = DEFAULT_BTP_TASKS.map((title, index) => ({
+      title,
+      projectId: project.id,
+      ...taskFieldsForStageIndex(index, stageIndex),
+      priority: 'Normale',
+      position: index,
+      createdBy: req.user.id,
+    }));
+    await db.ProjectTask.bulkCreate(taskRows);
+
+    const initialProgress = computeProgressFromTasks(taskRows);
+    await project.update({
+      progress: initialProgress,
+      status: advancementStage,
+    });
 
     // Logger l'action
     await db.Log.create({
@@ -105,42 +119,30 @@ exports.create = asyncHandler(async (req, res) => {
 });
 
 exports.update = asyncHandler(async (req, res) => {
+    if (req.role !== ROLE_DG) {
+      return error(res, 'Seul le directeur technique peut modifier un chantier', 403);
+    }
+
     const project = await db.Project.findByPk(req.params.id);
     if (!project) return notFound(res, 'Projet introuvable');
 
-    // Chef ne peut modifier que ses propres projets
-    if (req.role === 'Chef_chantier' && project.chefId !== req.user.id) {
-      return error(res, 'Vous ne pouvez modifier que vos propres projets', 403);
-    }
-
     const { body } = req;
-    // Si progress est absent du body ET le statut n'a pas changé,
-    // préserver la progression calculée depuis les tâches (ProjectTask)
-    if (body.progress === undefined && body.status && body.status === project.status) {
-      // statut inchangé → ne pas toucher progress
+    // Ne plus recalculer progress depuis le statut — l'avancement vient des tâches
+    if (body.progress === undefined) {
       delete body.progress;
-    } else if (body.progress === undefined && body.status && body.status !== project.status) {
-      // statut changé → calculer progress depuis le statut
-      const STATUS_PROGRESS = {
-        'préparation': 0,
-        'lancement': 15,
-        'exécution': 40,
-        'suivi': 65,
-        'contrôle': 85,
-        'clôture': 100,
-        'Planifié': 0,
-        'En cours': 40,
-        'Terminé': 100,
-        'Suspendu': project.progress || 0
-      };
-      body.progress = STATUS_PROGRESS[body.status] ?? project.progress ?? 0;
     }
 
     // Normaliser subCategory: ne pas envoyer de string vide à l'ENUM
     if (body.subCategory !== undefined && !body.subCategory?.trim()) {
       body.subCategory = null;
     }
+    const previousStatus = project.status;
     await project.update(body);
+
+    if (body.status !== undefined && body.status !== previousStatus) {
+      const synced = await syncTasksToAdvancementStage(db, project.id, body.status);
+      await project.update({ progress: synced.progress, status: synced.status });
+    }
 
     await db.Log.create({
       action: `Modification du projet : ${project.name}`,
@@ -152,13 +154,38 @@ exports.update = asyncHandler(async (req, res) => {
 });
 
 exports.remove = asyncHandler(async (req, res) => {
+    if (req.role !== ROLE_DG) {
+      return error(res, 'Seul le directeur technique peut supprimer un chantier', 403);
+    }
+
     const project = await db.Project.findByPk(req.params.id);
     if (!project) return notFound(res, 'Projet introuvable');
 
-    if (req.role === 'Chef_chantier' && project.chefId !== req.user.id) {
-      return error(res, 'Vous ne pouvez supprimer que vos propres projets', 403);
-    }
+    const projectId = project.id;
 
-    await project.destroy();
-    return success(res, null, 'Projet supprimé');
+    await db.sequelize.transaction(async (t) => {
+      const [unassignedCount] = await db.Employee.update(
+        { projectId: null },
+        { where: { projectId }, transaction: t },
+      );
+
+      await db.Equipment.update(
+        { projectId: null },
+        { where: { projectId }, transaction: t },
+      );
+
+      await project.destroy({ transaction: t });
+
+      await db.Log.create({
+        action: `Suppression du projet : ${project.name}${unassignedCount ? ` — ${unassignedCount} collaborateur(s) désaffecté(s)` : ''}`,
+        module: 'Projets',
+        entityType: 'Project',
+        entityId: projectId,
+        userId: req.user.id,
+        userRole: req.role,
+        userMatricule: req.user.matricule,
+      }, { transaction: t });
+    });
+
+    return success(res, null, 'Projet supprimé — le personnel affecté est de nouveau disponible');
 });

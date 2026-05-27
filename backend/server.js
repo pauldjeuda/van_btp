@@ -87,6 +87,35 @@ const start = async () => {
 
       // Démarrer le job de nettoyage des refresh tokens expirés
       startCleanupJob();
+
+      const vl = require('./config/vanLogistique');
+      if (vl.isOutboundEnabled() && vl.getRequestUrl()) {
+        const probeUrl = vl.getRequestUrl();
+        const probeCtrl = new AbortController();
+        const probeTimer = setTimeout(() => probeCtrl.abort(), 5000);
+        fetch(probeUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ description: '__connectivity_probe__', date: '2099-01-01' }),
+          signal: probeCtrl.signal,
+        })
+          .finally(() => clearTimeout(probeTimer))
+          .then((r) => {
+            if (r.ok || r.status === 400) {
+              console.log(`✅ VAN Logistique joignable : ${probeUrl}`);
+            } else {
+              console.warn(`⚠️  VAN Logistique répond HTTP ${r.status} : ${probeUrl}`);
+            }
+          })
+          .catch((err) => {
+            console.warn(
+              `⚠️  VAN Logistique injoignable (${err.cause?.code || err.code || err.message}) : ${probeUrl}`,
+            );
+            console.warn(
+              '    → Pas un problème CORS. Vérifiez IP/port, serveur démarré, même réseau Wi‑Fi.',
+            );
+          });
+      }
     });
   } catch (err) {
     console.error('❌ Erreur de démarrage :', err.message);

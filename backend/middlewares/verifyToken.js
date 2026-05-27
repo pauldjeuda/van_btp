@@ -7,11 +7,23 @@ const { verifyToken: jwtVerify, decodeToken } = require('../services/jwt.service
 const { unauthorized, error } = require('../utils/response');
 const db = require('../models');
 
+const ROLE_ALIASES = {
+  Directeur_technique: 'Directeur technique',
+  Gerant_stock: 'Gestionnaire de stocks',
+};
+
 const ROLE_MODELS = {
-  Directeur_technique: 'Directeur_technique',
+  'Directeur technique': 'Directeur technique',
   Chef_chantier: 'ChefChantier',
-  Technicien_chantier: 'TechnicienChantier',
-  RH: 'RH',
+  Gerant_production: 'GerantProduction',
+  'Gestionnaire de stocks': 'GerantStock',
+};
+
+const ROLE_RSA_DIRS = {
+  'directeur technique': 'directeur_technique',
+  'directeur_technique': 'directeur_technique',
+  'gestionnaire de stocks': 'gerant_stock',
+  gerant_stock: 'gerant_stock',
 };
 
 const verifyToken = async (req, res, next) => {
@@ -30,15 +42,17 @@ const verifyToken = async (req, res, next) => {
       return unauthorized(res, 'Token malformé — rôle introuvable');
     }
 
-    // toLowerCase uniquement pour trouver le dossier de clé RSA
-    const roleKey = decoded.role.toLowerCase();
+    const normalizedRole = ROLE_ALIASES[decoded.role] ?? decoded.role;
+
+    // Dossier .private (ancien directeur_technique conservé)
+    const roleKey = ROLE_RSA_DIRS[normalizedRole.toLowerCase()] ?? normalizedRole.toLowerCase();
 
     // Vérifier avec la clé publique du rôle
     const verified = jwtVerify(token, roleKey);
 
     // ─── RÉSOLUTION / AUTO-PROVISIONING ID LOCAL ─────────────────────────────
     // Indispensable si le token vient d'un système externe (VAN RH)
-    const modelName = ROLE_MODELS[decoded.role];
+    const modelName = ROLE_MODELS[normalizedRole];
     if (modelName && db[modelName]) {
       const Model = db[modelName];
       const searchMatricule = String(verified.matricule || '').trim().toLowerCase();
@@ -50,7 +64,7 @@ const verifyToken = async (req, res, next) => {
       });
       
       if (!localUser) {
-        console.log(`[AUTH] Auto-provisioning de l'utilisateur ${verified.matricule} (${decoded.role})`);
+        console.log(`[AUTH] Auto-provisioning de l'utilisateur ${verified.matricule} (${normalizedRole})`);
         // Créer l'utilisateur localement s'il n'existe pas (Confiance accordée au JWT RSA)
         localUser = await Model.create({
           matricule: verified.matricule,
@@ -70,7 +84,7 @@ const verifyToken = async (req, res, next) => {
     }
 
     req.user = verified;
-    req.role = decoded.role; // conserver la casse exacte du token (Directeur_technique, Chef_chantier…)
+    req.role = normalizedRole;
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {

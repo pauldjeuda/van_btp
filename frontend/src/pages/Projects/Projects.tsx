@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Plus,
@@ -25,7 +26,7 @@ import {
   DollarSign
 } from 'lucide-react';
 import { Card, Button, Input, Modal, cn } from '../../components/ui';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion } from 'motion/react';
 
 import { exportToCSV } from '../../lib/exportUtils';
 import jsPDF from 'jspdf';
@@ -36,26 +37,48 @@ import { useHistory } from '../../context/HistoryContext';
 import { useData } from '../../context/DataContext';
 import { useNotification } from '../../context/NotificationContext';
 import { projectService } from '../../services/project.service';
-import { ProjectTasksPanel } from '../../components/project/ProjectTasksPanel';
 import { amendmentService } from '../../services/amendment.service';
+import { approvalService } from '../../services/approval.service';
 import { calculateTimeRemaining, formatDateAmendment, InfoItem } from './ProjectsComponents';
+import { DEFAULT_BTP_TASKS } from '../../lib/defaultBtpTasks';
+import { projectTaskService } from '../../services/projectTask.service';
+import { filterProjectsForRole } from '../../lib/projectAccess';
 
 
 export const ProjectsPage = () => {
     const { t } = useTranslation();
 const today = new Date().toISOString().split('T')[0];
+  const navigate = useNavigate();
+  const location = useLocation();
   const { can } = usePermissions();
   const { role, profile } = useUser();
+  const canManageProjects = can('create_project') || can('modify_project');
+  const canValidateReports = can('validate_reports');
+  const projectDetailRoles = ['Chef_chantier', 'Directeur technique'];
+  const canOpenProjectDetail = projectDetailRoles.includes(role || '');
+  const openProjectDetail = (project: { id: number }) => {
+    if (canOpenProjectDetail && project.id) {
+      navigate(`/projects/${project.id}`);
+    }
+  };
   const userName = profile?.name;
   const { addLog } = useHistory();
-  const { projects, setProjects, addProject, updateProject, deleteProject, transactions, dailyReports, addDailyReport, employees, subcontracts, updateSubcontract } = useData();
+  const {
+    projects,
+    addProject,
+    updateProject,
+    deleteProject,
+    transactions,
+    dailyReports,
+    addDailyReport,
+    employees,
+    subcontracts,
+    updateSubcontract,
+    isDataSyncing,
+  } = useData();
   const { notify } = useNotification();
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [addStep, setAddStep] = useState(1);
-  const [selectedProject, setSelectedProject] = useState<any>(null);
-  const [activeTab, setActiveTab] = useState<'info' | 'personnel' | 'subcontracting' | 'tasks' | 'reports'>('info');
-  const [isNewReportModalOpen, setIsNewReportModalOpen] = useState(false);
-  const [expandedReportId, setExpandedReportId] = useState<number | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedRegion, setSelectedRegion] = useState('Toutes les régions');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
@@ -78,7 +101,7 @@ const today = new Date().toISOString().split('T')[0];
   const handleCreateAmendment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingProject) return;
-    if (!newAmendment.justification.trim()) { notify('La justification est obligatoire', 'error'); return; }
+    if (!newAmendment.justification.trim()) { notify(t('projects.notifications.justification_required'), 'error'); return; }
     setIsSubmittingAmendment(true);
     try {
       await amendmentService.create(editingProject.id, {
@@ -86,7 +109,7 @@ const today = new Date().toISOString().split('T')[0];
         ancienBudget: newAmendment.ancienBudget ? Number(newAmendment.ancienBudget) : undefined,
         nouveauBudget: newAmendment.nouveauBudget ? Number(newAmendment.nouveauBudget) : undefined
 });
-      notify('Avenant créé avec succès — En attente de validation DG', 'success');
+      notify(t('projects.notifications.amendment_created'), 'success');
       setIsAmendmentModalOpen(false);
       setNewAmendment({ type: 'Délai', justification: '', ancienneDate: '', nouvelleDate: '', ancienBudget: '', nouveauBudget: '' });
       loadAmendments(editingProject.id);
@@ -101,17 +124,18 @@ const today = new Date().toISOString().split('T')[0];
     setValidatingAmendments(prev => new Set(prev).add(amendmentId));
     
     try {
-      await amendmentService.updateStatus(editingProject.id, amendmentId, statut);
-      
-      // Mettre à jour la liste des avenants
+      const decision = statut === 'Approuvé' ? 'approve' : 'reject';
+      await approvalService.decide('amendment', amendmentId, decision);
+      window.dispatchEvent(new CustomEvent('van_btp:approvals_updated'));
+
       await loadAmendments(editingProject.id);
       
       // Mettre à jour les infos du projet si approuvé
       if (statut === 'Approuvé') {
         await updateProject(editingProject.id, {});
-        notify('Avenant approuvé et projet mis à jour avec succès', 'success');
+        notify(t('projects.notifications.amendment_approved'), 'success');
       } else {
-        notify('Avenant rejeté', 'warning');
+        notify(t('projects.notifications.amendment_rejected'), 'warning');
       }
       
       // Indiquer que le DG a validé/rejeté un avenant
@@ -138,7 +162,6 @@ const today = new Date().toISOString().split('T')[0];
   const [isUpdatingProject, setIsUpdatingProject] = useState(false);
   const [projectToDelete, setProjectToDelete] = useState<any>(null);
   const [isAddTaskModalOpen, setIsAddTaskModalOpen] = useState(false);
-  const [isSubmittingReport, setIsSubmittingReport] = useState(false);
   const [amendments, setAmendments] = useState<any[]>([]);
   const [isAmendmentModalOpen, setIsAmendmentModalOpen] = useState(false);
   const [isLoadingAmendments, setIsLoadingAmendments] = useState(false);
@@ -152,12 +175,13 @@ const today = new Date().toISOString().split('T')[0];
 });
   const [isSubmittingAmendment, setIsSubmittingAmendment] = useState(false);
   const [validatingAmendments, setValidatingAmendments] = useState<Set<number>>(new Set());
+  const [editTaskTitles, setEditTaskTitles] = useState<string[]>([...DEFAULT_BTP_TASKS]);
   const [hasValidatedAmendment, setHasValidatedAmendment] = useState(false);
 
   const [newProject, setNewProject] = useState({
     name: '',
     code: '',
-    client: 'MINTP (Travaux Publics)',
+    client: '',
     region: 'Littoral',
     location: '',
     budget: '',
@@ -167,7 +191,7 @@ const today = new Date().toISOString().split('T')[0];
     manager: '',
     startDate: '',
     duration: '12',
-    status: 'préparation',
+    status: '',
     category: 'Bâtiment' as 'Bâtiment' | 'Voirie' | 'Autre',
     subCategory: '' as string
 });
@@ -199,37 +223,12 @@ const today = new Date().toISOString().split('T')[0];
     'Sud-Ouest': ['Buea', 'Limbe', 'Kumba', 'Mamfe', 'Tiko', 'Muyuka', 'Bangem']
   };
 
-  // Charger les projets depuis l'API au montage
-  useEffect(() => {
-    const loadProjects = async () => {
-      try {
-        const data = await projectService.getAll();
-        const normalized = data.map((p: any) => ({
-          id: p.id,
-          code: p.code,
-          name: p.name,
-          client: p.client,
-          status: p.status,
-          budget: Number(p.budget || 0),
-          progress: p.progress || 0,
-          location: p.location || '',
-          region: p.region || '',
-          manager: p.manager || '',
-          start: p.startDate || '',
-          end: p.endDate || '',
-          category: p.category || '',
-          subCategory: p.subCategory || ''
-}));
-        setProjects(normalized);
-      } catch (err: any) {
-        notify(err.message || 'Erreur lors du chargement des chantiers', 'error');
-      }
-    };
+  const visibleProjects = useMemo(
+    () => filterProjectsForRole(projects, role, profile?.id),
+    [projects, role, profile?.id],
+  );
 
-    loadProjects();
-  }, []);
-
-  const filteredProjects = projects.filter(project => {
+  const filteredProjects = visibleProjects.filter(project => {
     const matchesSearch =
       (project.name?.toLowerCase().includes(searchQuery.toLowerCase()) || false) ||
       (project.client?.toLowerCase().includes(searchQuery.toLowerCase()) || false) ||
@@ -237,130 +236,9 @@ const today = new Date().toISOString().split('T')[0];
 
     const matchesRegion = selectedRegion === 'Toutes les régions' || project.region === selectedRegion;
 
-    // For technicians, only show projects they are assigned to or have been assigned to
-    if (role === 'Technicien_chantier') {
-      const currentEmployee = employees.find(e => e.name === userName);
-      const isAssigned = project.id === currentEmployee?.projectId;
-      const wasAssigned = currentEmployee?.assignmentHistory?.includes(project.name);
-      return matchesSearch && matchesRegion && (isAssigned || wasAssigned);
-    }
-
     return matchesSearch && matchesRegion;
   });
 
-  const handlePrint = () => {
-    if (!selectedProject) return;
-    
-    const doc = new jsPDF();
-    const p = selectedProject;
-    
-    // Header stylisé
-    doc.setFillColor(26, 54, 93); // #1a365d
-    doc.rect(0, 0, 210, 40, 'F');
-    
-    doc.setTextColor(255, 255, 255);
-    doc.setFontSize(22);
-    doc.text("VAN BTP - FICHE DESCRIPTIVE MARCHÉ", 105, 20, { align: 'center' });
-    
-    doc.setFontSize(10);
-    doc.text(`Réf: ${p.code} | Date: ${new Date().toLocaleDateString('fr-FR')}`, 105, 30, { align: 'center' });
-
-    // Section 1: Informations Générales
-    autoTable(doc, {
-      startY: 50,
-      head: [['1. INFORMATIONS GÉNÉRALES', '']],
-      body: [
-        ["Désignation du Projet", p.name],
-        ["Maître d'Ouvrage (Client)", p.client],
-        ["Lieu d'Exécution", `${p.location}, ${p.region}`],
-        ["Conducteur de Travaux", p.manager || 'N/A'],
-        ["Statut Actuel", p.status.toUpperCase()],
-        ["Avancement Global", `${p.progress}%`]
-      ],
-      theme: 'plain',
-      headStyles: { fillColor: [255, 255, 255], textColor: [26, 54, 93], fontSize: 14, fontStyle: 'bold', cellPadding: { bottom: 5 } },
-      styles: { fontSize: 10, cellPadding: 2 },
-      columnStyles: { 
-        0: { fontStyle: 'bold', cellWidth: 60 },
-        1: { cellWidth: 'auto' }
-      },
-      didDrawPage: (data) => {
-        // Dessiner la ligne sous le titre de section
-        doc.setDrawColor(226, 232, 240);
-        doc.line(14, 56, 196, 56);
-      }
-    });
-
-    // Section 2: Données Financières & Délais
-    const section1FinalY = (doc as any).lastAutoTable.finalY || 100;
-    
-    autoTable(doc, {
-      startY: section1FinalY + 15,
-      head: [['2. DONNÉES FINANCIÈRES & DÉLAIS', '']],
-      body: [
-        ["Budget Total (Initial)", `${new Intl.NumberFormat('fr-FR').format(p.budget).replace(/\s/g, ' ')} FCFA`],
-        ["Date de Démarrage", p.start || 'N/A'],
-        ["Date de Fin Prévisionnelle", p.end || 'N/A'],
-        ["Catégorie de Travaux", p.category || 'N/A'],
-        ["Sous-catégorie", p.subCategory || 'N/A']
-      ],
-      theme: 'plain',
-      headStyles: { fillColor: [255, 255, 255], textColor: [26, 54, 93], fontSize: 14, fontStyle: 'bold', cellPadding: { bottom: 5 } },
-      styles: { fontSize: 10, cellPadding: 2 },
-      columnStyles: { 
-        0: { fontStyle: 'bold', cellWidth: 60 },
-        1: { cellWidth: 'auto' }
-      },
-      didDrawPage: (data) => {
-        doc.setDrawColor(226, 232, 240);
-        doc.line(14, section1FinalY + 21, 196, section1FinalY + 21);
-      }
-    });
-
-    // Section 3: Avenants (si existants)
-    if (amendments.length > 0) {
-      const section2FinalY = (doc as any).lastAutoTable.finalY || 160;
-      
-      autoTable(doc, {
-        startY: section2FinalY + 15,
-        head: [['3. HISTORIQUE DES AVENANTS', '', '', '']],
-        body: [], // Titre seulement
-        theme: 'plain',
-        headStyles: { fillColor: [255, 255, 255], textColor: [26, 54, 93], fontSize: 14, fontStyle: 'bold', cellPadding: { bottom: 5 } },
-        didDrawPage: (data) => {
-          doc.setDrawColor(226, 232, 240);
-          doc.line(14, section2FinalY + 21, 196, section2FinalY + 21);
-        }
-      });
-
-      const amendmentData = amendments.map(a => [
-        a.type,
-        a.justification,
-        a.statut,
-        a.nouvelleDate ? new Date(a.nouvelleDate).toLocaleDateString('fr-FR') : (a.nouveauBudget ? `${new Intl.NumberFormat('fr-FR').format(Number(a.nouveauBudget)).replace(/\s/g, ' ')} FCFA` : '-')
-      ]);
-
-      autoTable(doc, {
-        startY: section2FinalY + 25,
-        head: [['TYPE', 'JUSTIFICATION', 'STATUT', 'MODIFICATION']],
-        body: amendmentData,
-        theme: 'striped',
-        headStyles: { fillColor: [26, 54, 93], textColor: 255 },
-        styles: { fontSize: 9, cellPadding: 3 }
-      });
-    }
-
-    // Pied de page
-    const pageCount = (doc as any).internal.getNumberOfPages();
-    for (let i = 1; i <= pageCount; i++) {
-      doc.setPage(i);
-      doc.setFontSize(8);
-      doc.setTextColor(150);
-      doc.text(`Document confidentiel VAN BTP - Généré le ${new Date().toLocaleDateString('fr-FR')} - Page ${i} sur ${pageCount}`, 105, 285, { align: 'center' });
-    }
-
-    doc.save(`Fiche_Marche_${p.name.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.pdf`);
-  };
 
   // Suppression de mapFrontendStatusToBackend au profit de la conservation des statuts détaillés
 
@@ -379,19 +257,37 @@ const today = new Date().toISOString().split('T')[0];
     }));
   };
 
-  // Charger les avenants quand un projet est sélectionné
-  useEffect(() => {
-    if (selectedProject) {
-      loadAmendments(selectedProject.id);
-    }
-  }, [selectedProject]);
 
-  // Réinitialiser l'état de validation quand la modale s'ouvre
+  // Ouvrir la modale d'édition si redirection depuis la page détail
+  useEffect(() => {
+    const editId = (location.state as { editProjectId?: number } | null)?.editProjectId;
+    if (!editId) return;
+    const p = projects.find((proj) => proj.id === editId);
+    if (p) {
+      setEditingProject(p);
+      setIsEditProjectModalOpen(true);
+    }
+    navigate(location.pathname, { replace: true, state: {} });
+  }, [location.state, projects, navigate, location.pathname]);
+
   useEffect(() => {
     if (isAmendmentModalOpen) {
       setHasValidatedAmendment(false);
     }
   }, [isAmendmentModalOpen]);
+
+  useEffect(() => {
+    if (!isEditProjectModalOpen || !editingProject?.id) {
+      setEditTaskTitles([...DEFAULT_BTP_TASKS]);
+      return;
+    }
+    projectTaskService.getAll(editingProject.id).then((tasks) => {
+      const titles = [...tasks]
+        .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+        .map((task) => task.title);
+      setEditTaskTitles(titles.length ? titles : [...DEFAULT_BTP_TASKS]);
+    }).catch(() => setEditTaskTitles([...DEFAULT_BTP_TASKS]));
+  }, [isEditProjectModalOpen, editingProject?.id]);
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -416,11 +312,13 @@ const today = new Date().toISOString().split('T')[0];
         region: newProject.region || '',
         startDate,
         endDate: computedEndDate.toISOString().split('T')[0],
-        status: newProject.status || 'préparation',
+        status: newProject.status || '',
         category: newProject.category || 'Autre',
         subCategory: (newProject.subCategory && newProject.subCategory !== '') ? newProject.subCategory : undefined,
         manager: newProject.manager || '',
-        progress: { 'préparation': 0, 'lancement': 15, 'exécution': 40, 'suivi': 65, 'contrôle': 85, 'clôture': 100 }[newProject.status] ?? 0
+        airRate: newProject.air || null,
+        guaranteeRetention: newProject.guarantee || null,
+        guaranteeBank: newProject.bank || null,
       };
 
       const createdProject = await projectService.create(payload as any);
@@ -441,7 +339,10 @@ const today = new Date().toISOString().split('T')[0];
         start: createdProject.startDate || '',
         end: createdProject.endDate || '',
         startDate: createdProject.startDate || '',
-        endDate: createdProject.endDate || ''
+        endDate: createdProject.endDate || '',
+        airRate: createdProject.airRate || '',
+        guaranteeRetention: createdProject.guaranteeRetention || '',
+        guaranteeBank: createdProject.guaranteeBank || '',
       } as any);
 
       addLog({
@@ -451,14 +352,14 @@ const today = new Date().toISOString().split('T')[0];
         type: 'success'
       });
 
-      notify(`Le chantier "${createdProject.name}" a été créé avec succès.`, 'success', '/projects');
+      notify(t('projects.notifications.project_created', { name: createdProject.name }), 'success', '/projects');
 
       setIsAddModalOpen(false);
       setAddStep(1);
       setNewProject({
         name: '',
         code: '',
-        client: 'MINTP (Travaux Publics)',
+        client: '',
         region: 'Littoral',
         location: '',
         budget: '',
@@ -468,7 +369,7 @@ const today = new Date().toISOString().split('T')[0];
         manager: '',
         startDate: '',
         duration: '12',
-        status: 'préparation',
+        status: '',
         category: 'Bâtiment',
         subCategory: ''
       });
@@ -499,7 +400,7 @@ const today = new Date().toISOString().split('T')[0];
         type: 'warning'
       });
 
-      notify(`Le chantier "${projectToDelete.name}" a été supprimé avec succès.`, 'success', '/projects');
+      notify(t('projects.notifications.project_deleted', { name: projectToDelete.name }), 'success', '/projects');
       setIsDeleteModalOpen(false);
       setProjectToDelete(null);
     } catch (err: any) {
@@ -518,9 +419,9 @@ const today = new Date().toISOString().split('T')[0];
             <span>{t('projects.execution')}</span>
           </div>
           <h1 className="text-4xl font-black text-slate-900 tracking-tighter">{t('projects.title')}</h1>
-          <p className="text-slate-500 font-medium mt-1">Digitalisation complète du cycle de vie BTP au Cameroun</p>
+          <p className="text-slate-500 font-medium mt-1">{t('projects.digitalization_desc')}</p>
         </div>
-        {(role === 'Directeur_technique' || role === 'Chef_chantier') && (
+        {canManageProjects && (
           <Button onClick={() => setIsAddModalOpen(true)} className="shadow-lg shadow-blue-900/20 h-12 px-6 font-bold">
             <Plus className="w-5 h-5 mr-2" />
             {t('projects.create_project')}
@@ -532,7 +433,12 @@ const today = new Date().toISOString().split('T')[0];
       {/* ... */}
 
       {/* Project Grid/List */}
-      {viewMode === 'grid' ? (
+      {isDataSyncing ? (
+        <div className="flex flex-col items-center justify-center py-24 gap-4">
+          <div className="animate-spin h-10 w-10 border-2 border-[var(--color-primary)] border-t-transparent rounded-full" />
+          <p className="text-sm font-bold text-slate-500">{t('projects.loading_sites')}</p>
+        </div>
+      ) : viewMode === 'grid' ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8">
           {filteredProjects.map((project, idx) => (
             <motion.div
@@ -542,9 +448,7 @@ const today = new Date().toISOString().split('T')[0];
               animate={{ opacity: 1, y: 0 }}
               whileHover={{ y: -4 }}
               className="group cursor-pointer"
-              onClick={() => {
-                setSelectedProject(project);
-              }}
+              onClick={() => openProjectDetail(project)}
             >
               <Card className="h-full border-none shadow-lg shadow-slate-200/40 hover:shadow-2xl hover:shadow-slate-200/60 transition-all duration-500 overflow-hidden flex flex-col">
                 <div className="h-2 bg-[var(--color-primary)] w-full"></div>
@@ -553,19 +457,17 @@ const today = new Date().toISOString().split('T')[0];
                     <div className="flex flex-col">
                       <span className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-1">{project.code}</span>
                       <span className={cn(
-                        "inline-flex items-center px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider",
-                        project.status === 'clôture' ? "bg-slate-900 text-white" :
-                        project.status === 'contrôle' ? "bg-emerald-500 text-white" :
-                        project.status === 'exécution' ? "bg-blue-600 text-white shadow-lg shadow-blue-200" :
-                        project.status === 'suivi' ? "bg-indigo-500 text-white" :
-                        project.status === 'lancement' ? "bg-amber-500 text-white" :
+                        "inline-flex items-center px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider max-w-[180px] truncate",
+                        (project.progress ?? 0) >= 100 ? "bg-emerald-500 text-white" :
+                        (project.progress ?? 0) >= 50 ? "bg-blue-600 text-white" :
+                        (project.progress ?? 0) > 0 ? "bg-amber-500 text-white" :
                         "bg-slate-100 text-slate-600"
                       )}>
-                        <span className="w-1.5 h-1.5 rounded-full bg-current opacity-50 mr-1.5 animate-pulse" />
-                        {project.status}
+                        <span className="w-1.5 h-1.5 rounded-full bg-current opacity-50 mr-1.5 animate-pulse shrink-0" />
+                        {project.status || t('projects.wizard.advancement_start')}
                       </span>
                     </div>
-                    {(role === 'Directeur_technique' || role === 'Chef_chantier') && (
+                    {canManageProjects && (
                       <div className="relative">
                         <button 
                           className="p-2 hover:bg-slate-100 rounded-xl text-slate-400 transition-colors"
@@ -649,13 +551,12 @@ const today = new Date().toISOString().split('T')[0];
                     className="flex-1 text-xs font-bold text-slate-600 hover:text-[var(--color-primary)] hover:bg-white"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setSelectedProject(project);
-                      setActiveTab('info');
+                      openProjectDetail(project);
                     }}
                   >
                     {t('projects.market_details')}
                   </Button>
-                  {(role === 'Directeur_technique' || role === 'Chef_chantier') && (
+                  {canManageProjects && (
                     <>
                       <div className="w-px h-4 bg-slate-200"></div>
                       <Button
@@ -668,7 +569,7 @@ const today = new Date().toISOString().split('T')[0];
                           setIsEditProjectModalOpen(true);
                         }}
                       >
-                        Modifier
+                        {t('projects.modify')}
                       </Button>
                     </>
                   )}
@@ -682,12 +583,12 @@ const today = new Date().toISOString().split('T')[0];
           <table className="w-full">
             <thead className="bg-slate-50 border-b border-slate-100">
               <tr className="text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                <th className="px-6 py-4">Chantier</th>
-                <th className="px-6 py-4">Client</th>
-                <th className="px-6 py-4">Localisation</th>
-                <th className="px-6 py-4">Avancement</th>
-                <th className="px-6 py-4">Statut</th>
-                <th className="px-6 py-4 text-right">Actions</th>
+                <th className="px-6 py-4">{t('projects.table.site')}</th>
+                <th className="px-6 py-4">{t('projects.table.client')}</th>
+                <th className="px-6 py-4">{t('projects.table.location')}</th>
+                <th className="px-6 py-4">{t('projects.table.progress')}</th>
+                <th className="px-6 py-4">{t('projects.table.status')}</th>
+                <th className="px-6 py-4 text-right">{t('projects.table.actions')}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
@@ -720,7 +621,7 @@ const today = new Date().toISOString().split('T')[0];
                       project.status === 'clôture' ? "bg-emerald-100 text-emerald-700" :
                         project.status === 'exécution' ? "bg-blue-100 text-blue-700" :
                           "bg-amber-100 text-amber-700"
-                    )}>{project.status}</span>
+                    )}>{project.status || t('projects.wizard.advancement_start')}</span>
                   </td>
                   <td className="px-6 py-4 text-right">
                     <div className="flex items-center justify-end gap-2">
@@ -730,13 +631,12 @@ const today = new Date().toISOString().split('T')[0];
                         className="h-8 w-8 p-0"
                         onClick={(e) => {
                           e.stopPropagation();
-                          setSelectedProject(project);
-                          setActiveTab('info');
+                          openProjectDetail(project);
                         }}
                       >
                         <FileText className="w-4 h-4" />
                       </Button>
-                      {(role === 'Directeur_technique' || role === 'Chef_chantier') && (
+                      {canManageProjects && (
                         <Button
                           variant="ghost"
                           size="sm"
@@ -763,7 +663,7 @@ const today = new Date().toISOString().split('T')[0];
       <Modal
         isOpen={isAddModalOpen}
         onClose={() => setIsAddModalOpen(false)}
-        title="Ouverture de Dossier Marché"
+        title={t('projects.modals.market_open')}
         size="lg"
       >
         <div className="space-y-8">
@@ -771,10 +671,10 @@ const today = new Date().toISOString().split('T')[0];
           <div className="flex items-center justify-between px-12 relative">
             <div className="absolute top-1/2 left-12 right-12 h-0.5 bg-slate-100 -translate-y-1/2 z-0"></div>
             {[
-              { step: 1, label: 'Admin' },
-              { step: 2, label: 'Finances' },
-              { step: 3, label: 'Technique' },
-              { step: 4, label: 'Résumé' }
+              { step: 1, label: t('projects.wizard.step_admin') },
+              { step: 2, label: t('projects.wizard.step_finances') },
+              { step: 3, label: t('projects.wizard.step_tech') },
+              { step: 4, label: t('projects.wizard.step_summary') }
             ].map((s) => (
               <div key={s.step} className="flex flex-col items-center gap-2 z-10">
                 <div className={cn(
@@ -793,28 +693,28 @@ const today = new Date().toISOString().split('T')[0];
           <form onSubmit={handleCreateProject} className="space-y-6">
             {addStep === 1 && (
               <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
-                <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-2">Identification Administrative</h4>
+                <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-2">{t('projects.wizard.admin_title')}</h4>
                 <Input
-                  label="Libellé du Marché"
-                  placeholder="Ex: Construction d'un dalot à Douala"
+                  label={t('projects.wizard.market_label')}
+                  placeholder={t('projects.wizard.market_placeholder')}
                   required
                   value={newProject.name}
                   onChange={(e) => setNewProject({ ...newProject, name: e.target.value })}
                 />
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <Input
-                    label="Numéro de Marché"
-                    placeholder="N° 001/M/MINTP/..."
+                    label={t('projects.wizard.market_number')}
+                    placeholder={t('projects.wizard.market_number_placeholder')}
                     required
                     value={newProject.code}
                     onChange={(e) => setNewProject({ ...newProject, code: e.target.value })}
                   />
                   <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700">Maître d'Ouvrage</label>
+                    <label className="text-sm font-bold text-slate-700">{t('projects.wizard.client_label')}</label>
                     <input
                       type="text"
                       className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                      placeholder="Ex: MINTP, MINSANTE, PAK..."
+                      placeholder={t('projects.wizard.client_placeholder')}
                       value={newProject.client}
                       onChange={(e) => setNewProject({ ...newProject, client: e.target.value })}
                     />
@@ -822,7 +722,7 @@ const today = new Date().toISOString().split('T')[0];
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700">Région</label>
+                    <label className="text-sm font-bold text-slate-700">{t('projects.wizard.region')}</label>
                     <select
                       className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                       value={newProject.region}
@@ -834,7 +734,7 @@ const today = new Date().toISOString().split('T')[0];
                     </select>
                   {/* Catégorie du chantier */}
                   <div className="space-y-1.5">
-                    <label className="text-sm font-medium text-slate-700">Catégorie du chantier</label>
+                    <label className="text-sm font-medium text-slate-700">{t('projects.wizard.category')}</label>
                     <div className="flex flex-col gap-2">
                       <select
                         className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
@@ -848,16 +748,16 @@ const today = new Date().toISOString().split('T')[0];
                           }
                         }}
                       >
-                        <option value="Bâtiment">Bâtiment</option>
-                        <option value="Voirie">Voirie</option>
-                        <option value="Autre">Autre (Saisie manuelle)</option>
+                        <option value="Bâtiment">{t('projects.category.building') || 'Bâtiment'}</option>
+                        <option value="Voirie">{t('projects.category.road') || 'Voirie'}</option>
+                        <option value="Autre">{t('projects.wizard.category_other')}</option>
                       </select>
 
                       {((newProject.category !== 'Bâtiment' && newProject.category !== 'Voirie') || newProject.category === 'Autre') && (
                         <input
                           type="text"
                           className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)] animate-in fade-in slide-in-from-top-1 duration-200"
-                          placeholder="Précisez la catégorie (ex: Ouvrages d'Art, Hydraulique...)"
+                          placeholder={t('projects.wizard.category_placeholder')}
                           value={newProject.category === 'Autre' ? '' : newProject.category}
                           onChange={(e) => setNewProject({ ...newProject, category: e.target.value as any })}
                           required
@@ -867,7 +767,7 @@ const today = new Date().toISOString().split('T')[0];
                   </div>
                   {newProject.category === 'Bâtiment' && (
                     <div className="space-y-1.5">
-                      <label className="text-sm font-medium text-slate-700">Sous-catégorie</label>
+                      <label className="text-sm font-medium text-slate-700">{t('projects.wizard.subcategory')}</label>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         {(['Gros œuvre', 'Second œuvre'] as const).map(sub => (
                           <button
@@ -876,7 +776,7 @@ const today = new Date().toISOString().split('T')[0];
                             onClick={() => setNewProject({ ...newProject, subCategory: sub })}
                             className={`p-3 rounded-xl border-2 text-sm font-bold transition-all ${newProject.subCategory === sub ? 'border-[var(--color-primary)] bg-blue-50 text-[var(--color-primary)]' : 'border-slate-200 text-slate-600 hover:border-slate-300'}`}
                           >
-                            {sub === 'Gros œuvre' ? '' : '🪟'} {sub}
+                            {sub === 'Gros œuvre' ? t('projects.wizard.gros_oeuvre') : t('projects.wizard.second_oeuvre')}
                           </button>
                         ))}
                       </div>
@@ -884,7 +784,7 @@ const today = new Date().toISOString().split('T')[0];
                   )}
                   </div>
                   <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700">Lieu d'Exécution</label>
+                    <label className="text-sm font-bold text-slate-700">{t('projects.wizard.location')}</label>
                     <div className="flex flex-col gap-2">
                       <select
                         className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
@@ -899,18 +799,18 @@ const today = new Date().toISOString().split('T')[0];
                         }}
                         required
                       >
-                        <option value="">— Sélectionner une ville —</option>
+                        <option key="city-placeholder" value="">{t('projects.wizard.city_placeholder')}</option>
                         {(regionCities[newProject.region] || []).map(city => (
                           <option key={city} value={city}>{city}</option>
                         ))}
-                        <option value="Autre">Autre (Saisie manuelle)</option>
+                        <option value="Autre">{t('projects.wizard.location_manual')}</option>
                       </select>
                       
                       {(!regionCities[newProject.region]?.includes(newProject.location) || newProject.location === '') && (
                         <input
                           type="text"
                           className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)] animate-in fade-in slide-in-from-top-1 duration-200"
-                          placeholder="Saisir manuellement le lieu..."
+                          placeholder={t('projects.wizard.location_manual_placeholder')}
                           value={newProject.location}
                           onChange={(e) => setNewProject({ ...newProject, location: e.target.value })}
                           required
@@ -924,10 +824,10 @@ const today = new Date().toISOString().split('T')[0];
 
             {addStep === 2 && (
               <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
-                <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-2">Paramètres Financiers & Fiscaux</h4>
+                <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-2">{t('projects.wizard.finances_title')}</h4>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700">Montant TTC (FCFA)</label>
+                    <label className="text-sm font-bold text-slate-700">{t('projects.wizard.amount_ttc')}</label>
                     <div className="relative">
                       <Banknote className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                       <input
@@ -948,7 +848,7 @@ const today = new Date().toISOString().split('T')[0];
                     </div>
                   </div>
                   <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700">Taux AIR (%)</label>
+                    <label className="text-sm font-bold text-slate-700">{t('projects.wizard.air_rate')}</label>
                     <select
                       className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                       value={newProject.air}
@@ -959,23 +859,21 @@ const today = new Date().toISOString().split('T')[0];
                     </select>
                   </div>
                   <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700">Statut Initial</label>
+                    <label className="text-sm font-bold text-slate-700">{t('projects.wizard.advancement_state')}</label>
                     <select
                       className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                       value={newProject.status}
                       onChange={(e) => setNewProject({ ...newProject, status: e.target.value })}
                     >
-                      <option value="préparation">Préparation</option>
-                      <option value="lancement">Lancement</option>
-                      <option value="exécution">Exécution</option>
-                      <option value="suivi">Suivi</option>
-                      <option value="contrôle">Contrôle</option>
-                      <option value="clôture">Clôture</option>
+                      <option value="">{t('projects.wizard.advancement_start')}</option>
+                      {DEFAULT_BTP_TASKS.map((title) => (
+                        <option key={title} value={title}>{title}</option>
+                      ))}
                     </select>
                   </div>
                 </div>
                 <Input
-                    label="Retenue de Garantie (%)"
+                    label={t('projects.wizard.guarantee_retention')}
                     type="number"
                     min="0" max="100"
                     placeholder="10"
@@ -983,8 +881,8 @@ const today = new Date().toISOString().split('T')[0];
                     onChange={(e) => setNewProject({ ...newProject, guarantee: e.target.value })}
                   />
                 <Input
-                  label="Banque de Cautionnement"
-                  placeholder="Ex: SCB, BICEC, Afriland..."
+                  label={t('projects.wizard.guarantee_bank')}
+                  placeholder={t('projects.wizard.guarantee_bank_placeholder')}
                   value={newProject.bank}
                   onChange={(e) => setNewProject({ ...newProject, bank: e.target.value })}
                 />
@@ -993,24 +891,24 @@ const today = new Date().toISOString().split('T')[0];
 
             {addStep === 3 && (
               <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
-                <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-2">Organisation Technique</h4>
+                <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-2">{t('projects.wizard.tech_title')}</h4>
                 <Input
-                  label="Conducteur de Travaux"
-                  placeholder="Nom du responsable"
+                  label={t('projects.wizard.manager')}
+                  placeholder={t('projects.wizard.manager_placeholder')}
                   required
                   value={newProject.manager}
                   onChange={(e) => setNewProject({ ...newProject, manager: e.target.value })}
                 />
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <Input
-                    label="Date Ordre de Service"
+                    label={t('projects.wizard.os_date')}
                     type="date" min={today}
                     required
                     value={newProject.startDate}
                     onChange={(e) => setNewProject({ ...newProject, startDate: e.target.value })}
                   />
                   <Input
-                    label="Délai Contractuel (Mois)"
+                    label={t('projects.wizard.contractual_duration')}
                     type="number"
                     min="1"
                     placeholder="12"
@@ -1022,7 +920,7 @@ const today = new Date().toISOString().split('T')[0];
                 <div className="p-4 bg-blue-50 rounded-xl border border-blue-100">
                   <p className="text-xs font-bold text-blue-700 flex items-center gap-2">
                     <AlertCircle className="w-4 h-4" />
-                    Note: La validation crée automatiquement le planning initial.
+                    {t('projects.wizard.tech_note')}
                   </p>
                 </div>
               </div>
@@ -1030,31 +928,31 @@ const today = new Date().toISOString().split('T')[0];
 
             {addStep === 4 && (
               <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
-                <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-2">Résumé du Dossier Marché</h4>
+                <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-2">{t('projects.wizard.summary_title')}</h4>
                 <div className="bg-slate-50 p-6 rounded-xl border border-slate-100 space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <p className="text-[10px] font-bold text-slate-400 uppercase">Libellé</p>
-                      <p className="text-sm font-black text-slate-900">{newProject.name || 'Non renseigné'}</p>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase">{t('projects.wizard.market_label')}</p>
+                      <p className="text-sm font-black text-slate-900">{newProject.name || t('common.not_specified')}</p>
                     </div>
                     <div>
-                      <p className="text-[10px] font-bold text-slate-400 uppercase">Maître d'Ouvrage</p>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase">{t('projects.wizard.client_label')}</p>
                       <p className="text-sm font-black text-slate-900">{newProject.client}</p>
                     </div>
                     <div>
-                      <p className="text-[10px] font-bold text-slate-400 uppercase">Montant TTC</p>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase">{t('projects.wizard.amount_ttc')}</p>
                       <p className="text-sm font-black text-slate-900">{newProject.budget ? `${parseInt(newProject.budget).toLocaleString()} FCFA` : '0 FCFA'}</p>
                     </div>
                     <div>
-                      <p className="text-[10px] font-bold text-slate-400 uppercase">Délai</p>
-                      <p className="text-sm font-black text-slate-900">{newProject.duration} Mois</p>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase">{t('projects.wizard.contractual_duration')}</p>
+                      <p className="text-sm font-black text-slate-900">{newProject.duration} {t('common.months')}</p>
                     </div>
                   </div>
                 </div>
                 <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-100">
                   <p className="text-xs font-bold text-emerald-700 flex items-center gap-2">
                     <CheckCircle2 className="w-4 h-4" />
-                    Le dossier est prêt à être créé. Les équipes seront notifiées.
+                    {t('projects.wizard.summary_ready')}
                   </p>
                 </div>
               </div>
@@ -1062,16 +960,16 @@ const today = new Date().toISOString().split('T')[0];
 
             <div className="pt-6 border-t border-slate-100 flex justify-between">
               <Button variant="ghost" type="button" onClick={() => addStep > 1 ? setAddStep(addStep - 1) : setIsAddModalOpen(false)}>
-                {addStep === 1 ? 'Annuler' : 'Précédent'}
+                {addStep === 1 ? t('common.cancel') : t('common.back')}
               </Button>
               <Button type="submit" className="px-8 font-bold shadow-lg shadow-blue-900/20" disabled={isCreatingProject}>
                 {isCreatingProject ? (
                   <>
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                    Traitement...
+                    {t('common.modals.processing')}
                   </>
                 ) : (
-                  addStep === 4 ? 'Créer le Chantier' : 'Suivant'
+                  addStep === 4 ? t('projects.create_project') : t('common.next')
                 )}
               </Button>
             </div>
@@ -1079,435 +977,12 @@ const today = new Date().toISOString().split('T')[0];
         </div>
       </Modal>
 
-      {/* Project Details Modal Simulation */}
-      <AnimatePresence>
-        {selectedProject && (
-          <Modal
-            isOpen={!!selectedProject}
-            onClose={() => setSelectedProject(null)}
-            title={`Dossier Marché: ${selectedProject.name}`}
-            size="xl"
-          >
-            <div className="space-y-8">
-              {/* Tabs */}
-              <div className="flex flex-wrap gap-1 border-b border-slate-100 pb-0">
-                {[
-                  { id: 'info', label: 'Infos', icon: FileText, roles: ['Directeur_technique', 'Chef_chantier', 'Technicien_chantier', 'RH'] },
-                  { id: 'personnel', label: 'Personnel', icon: Users, roles: ['Directeur_technique', 'Chef_chantier', 'RH'] },
-                  { id: 'subcontracting', label: 'Sous-traitance', icon: Handshake, roles: ['Directeur_technique', 'Chef_chantier'] },
-                  { id: 'tasks', label: 'Tâches', icon: ClipboardCheck, roles: ['Directeur_technique', 'Chef_chantier', 'Technicien_chantier'] },
-                  { id: 'reports', label: 'Journal', icon: ClipboardList, roles: ['Directeur_technique', 'Chef_chantier', 'Technicien_chantier'] },
-                ].filter(tab => tab.roles.includes(role || '')).map((tab) => (
-                  <button
-                    key={tab.id}
-                    onClick={() => setActiveTab(tab.id as any)}
-                    className={cn(
-                      "flex items-center gap-2 px-4 py-3 text-sm font-bold transition-all relative",
-                      activeTab === tab.id 
-                        ? "text-[var(--color-primary)] border-b-2 border-[var(--color-primary)] bg-blue-50" 
-                        : "text-slate-400 hover:text-slate-600 hover:bg-slate-50"
-                    )}
-                  >
-                    <tab.icon className="w-4 h-4" />
-                    <span className="hidden sm:inline">{tab.label}</span>
-                    <span className="sm:hidden text-xs">{tab.label.split(' ')[0]}</span>
-                  </button>
-                ))}
-              </div>
-
-              {/* Tab Content */}
-              <div className="min-h-[450px]">
-                {activeTab === 'info' && (
-                  <div className="space-y-8">
-                    {/* Header avec informations principales */}
-                    <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-8 rounded-2xl border border-blue-100">
-                      <div className="flex items-start justify-between">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-3 mb-3">
-                            <div className="w-12 h-12 bg-blue-600 rounded-xl flex items-center justify-center">
-                              <FileText className="w-6 h-6 text-white" />
-                            </div>
-                            <div>
-                              <h3 className="text-xl font-black text-slate-900">{selectedProject.name}</h3>
-                              <p className="text-sm text-slate-600">Code: {selectedProject.code}</p>
-                            </div>
-                          </div>
-                          <div className="flex flex-wrap gap-3 mt-4">
-                            <span className={cn(
-                              "inline-flex items-center px-3 py-1 rounded-lg text-xs font-bold uppercase tracking-wider",
-                              selectedProject.status === 'clôture' ? "bg-slate-900 text-white" :
-                              selectedProject.status === 'contrôle' ? "bg-emerald-500 text-white" :
-                              selectedProject.status === 'exécution' ? "bg-blue-600 text-white" :
-                              selectedProject.status === 'suivi' ? "bg-indigo-500 text-white" :
-                              selectedProject.status === 'lancement' ? "bg-amber-500 text-white" :
-                              "bg-slate-100 text-slate-700"
-                            )}>
-                              {selectedProject.status}
-                            </span>
-                            <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold bg-purple-100 text-purple-700">
-                              {selectedProject.category}
-                            </span>
-                            {selectedProject.subCategory && (
-                              <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-700">
-                                {selectedProject.subCategory}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <div className="text-3xl font-black text-blue-600">
-                            {Number(selectedProject.budget || 0).toLocaleString()}
-                          </div>
-                          <div className="text-sm text-slate-600 font-medium">FCFA</div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Informations détaillées en grille */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                      {/* Carte Client et Localisation */}
-                      <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-                        <div className="flex items-center gap-3 mb-4">
-                          <div className="w-10 h-10 bg-emerald-100 rounded-lg flex items-center justify-center">
-                            <Building2 className="w-5 h-5 text-emerald-600" />
-                          </div>
-                          <h4 className="font-bold text-slate-900">{t('projects.client_location')}</h4>
-                        </div>
-                        <div className="space-y-3">
-                          <div className="flex items-start gap-3">
-                            <User className="w-4 h-4 text-slate-400 mt-0.5" />
-                            <div>
-                              <div className="text-xs text-slate-500">Maître d'Ouvrage</div>
-                              <div className="font-medium text-slate-900">{selectedProject.client}</div>
-                            </div>
-                          </div>
-                          <div className="flex items-start gap-3">
-                            <MapPin className="w-4 h-4 text-slate-400 mt-0.5" />
-                            <div>
-                              <div className="text-xs text-slate-500">Localisation</div>
-                              <div className="font-medium text-slate-900">{selectedProject.location}</div>
-                            </div>
-                          </div>
-                          <div className="flex items-start gap-3">
-                            <Globe className="w-4 h-4 text-slate-400 mt-0.5" />
-                            <div>
-                              <div className="text-xs text-slate-500">Région</div>
-                              <div className="font-medium text-slate-900">{selectedProject.region}</div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Carte Équipe */}
-                      <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-                        <div className="flex items-center gap-3 mb-4">
-                          <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
-                            <Users className="w-5 h-5 text-blue-600" />
-                          </div>
-                          <h4 className="font-bold text-slate-900">Équipe</h4>
-                        </div>
-                        <div className="space-y-3">
-                          <div className="flex items-start gap-3">
-                            <HardHat className="w-4 h-4 text-slate-400 mt-0.5" />
-                            <div>
-                              <div className="text-xs text-slate-500">Conducteur de Travaux</div>
-                              <div className="font-medium text-slate-900">{selectedProject.manager || 'Non assigné'}</div>
-                            </div>
-                          </div>
-                          <div className="flex items-start gap-3">
-                            <FileText className="w-4 h-4 text-slate-400 mt-0.5" />
-                            <div>
-                              <div className="text-xs text-slate-500">Avenants</div>
-                              <div className="font-medium text-slate-900">{amendments.length} avenant(s)</div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Carte Planning */}
-                      <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
-                        <div className="flex items-center gap-3 mb-4">
-                          <div className="w-10 h-10 bg-amber-100 rounded-lg flex items-center justify-center">
-                            <Calendar className="w-5 h-5 text-amber-600" />
-                          </div>
-                          <h4 className="font-bold text-slate-900">Planning</h4>
-                        </div>
-                        <div className="space-y-3">
-                          <div className="flex items-start gap-3">
-                            <Calendar className="w-4 h-4 text-slate-400 mt-0.5" />
-                            <div>
-                              <div className="text-xs text-slate-500">Date de Début</div>
-                              <div className="font-medium text-slate-900">{selectedProject.start}</div>
-                            </div>
-                          </div>
-                          <div className="flex items-start gap-3">
-                            <Calendar className="w-4 h-4 text-slate-400 mt-0.5" />
-                            <div>
-                              <div className="text-xs text-slate-500">Date de Fin</div>
-                              <div className="font-medium text-slate-900">{selectedProject.end}</div>
-                            </div>
-                          </div>
-                          <div className="flex items-start gap-3">
-                            <Clock className="w-4 h-4 text-slate-400 mt-0.5" />
-                            <div>
-                              <div className="text-xs text-slate-500">Temps restant</div>
-                              <div className="font-bold text-blue-600">{calculateTimeRemaining(selectedProject.end)}</div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Budget Détaillé */}
-                    {(selectedProject.budgetItems && selectedProject.budgetItems.length > 0) && (
-                      <div className="bg-white p-8 rounded-xl border border-slate-200 shadow-sm">
-                        <div className="flex items-center gap-3 mb-6">
-                          <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
-                            <DollarSign className="w-5 h-5 text-green-600" />
-                          </div>
-                          <h4 className="font-bold text-slate-900 text-lg">Budget Détaillé par Poste</h4>
-                        </div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                          {selectedProject.budgetItems.map((item: any, index: number) => (
-                            <div key={index} className="bg-gradient-to-r from-green-50 to-emerald-50 p-4 rounded-lg border border-green-200">
-                              <div className="text-sm font-medium text-slate-700 mb-2">{item.poste}</div>
-                              <div className="text-xl font-bold text-green-700">
-                                {Number(item.montantPrevu || 0).toLocaleString()} FCFA
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {activeTab === 'personnel' && (
-                  <div className="space-y-6">
-                    <div className="flex items-center justify-between">
-                      <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest">Personnel Affecté</h4>
-                      <div className="relative">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                        <input
-                          type="text"
-                          placeholder="Rechercher..."
-                          className="pl-10 pr-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-xs font-medium focus:ring-2 focus:ring-[var(--color-primary)] outline-none w-64"
-                        />
-                      </div>
-                    </div>
-                    <div className="overflow-hidden border border-slate-100 rounded-3xl">
-                      <table className="w-full">
-                        <thead className="bg-slate-50">
-                          <tr className="text-left text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                            <th className="px-6 py-4">Employé</th>
-                            <th className="px-6 py-4">Poste</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-50">
-                          {employees.filter(e => e.projectId === selectedProject.id).map(e => (
-                            <tr key={e.id} className="text-sm font-medium hover:bg-slate-50 transition-colors">
-                              <td className="px-6 py-4 font-black">{e.name}</td>
-                              <td className="px-6 py-4 text-slate-500">{e.role}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
-
-                {activeTab === 'subcontracting' && (
-                  <div className="space-y-6">
-                    <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest">Contrats de Sous-traitance</h4>
-                    <div className="grid grid-cols-1 gap-6">
-                      {subcontracts.filter(s => s.projectId === selectedProject.id).map(s => (
-                        <Card key={s.id} className="p-6 border-none shadow-sm bg-slate-50/50">
-                          <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-6">
-                            <div className="flex flex-col sm:flex-row sm:items-center gap-4">
-                              <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center text-[var(--color-primary)] shadow-sm">
-                                <Handshake className="w-6 h-6" />
-                              </div>
-                              <div>
-                                <p className="font-black text-slate-900 text-lg">{s.entreprise}</p>
-                                <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">{s.objet}</p>
-                              </div>
-                            </div>
-                            <div className="text-right">
-                              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Montant Contrat</p>
-                              <p className="text-lg font-black text-slate-900">{s.montant.toLocaleString()} FCFA</p>
-                            </div>
-                          </div>
-
-                          <div className="space-y-4">
-                            <div className="flex justify-between items-center">
-                              <span className="text-xs font-black text-slate-400 uppercase tracking-widest">Avancement des tâches</span>
-                              <span className="text-xs font-black text-[var(--color-primary)]">{s.progress}%</span>
-                            </div>
-                            <div className="h-2 bg-white rounded-full overflow-hidden shadow-inner">
-                              <motion.div
-                                initial={{ width: 0 }}
-                                animate={{ width: `${s.progress}%` }}
-                                className="h-full bg-[var(--color-primary)]"
-                              />
-                            </div>
-
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
-                              {s.tasks?.map((task: any) => (
-                                <div
-                                  key={task.id}
-                                  onClick={() => {
-                                    const updatedTasks = s.tasks.map(t => t.id === task.id ? { ...t, completed: !t.completed } : t);
-                                    const completedCount = updatedTasks.filter(t => t.completed).length;
-                                    const progress = updatedTasks.length > 0 ? Math.round((completedCount / updatedTasks.length) * 100) : 0;
-                                    updateSubcontract(s.id, { tasks: updatedTasks, progress });
-                                  }}
-                                  className={cn(
-                                    "flex items-center gap-3 p-3 rounded-xl border transition-all cursor-pointer",
-                                    task.completed
-                                      ? "bg-emerald-50 border-emerald-100 text-emerald-900"
-                                      : "bg-white border-slate-100 text-slate-600 hover:border-[var(--color-primary)]"
-                                  )}
-                                >
-                                  <div className={cn(
-                                    "w-4 h-4 rounded border flex items-center justify-center transition-colors",
-                                    task.completed
-                                      ? "bg-emerald-500 border-emerald-500 text-white"
-                                      : "bg-white border-slate-300"
-                                  )}>
-                                    {task.completed && <ClipboardCheck className="w-3 h-3" />}
-                                  </div>
-                                  <span className={cn(
-                                    "text-xs font-bold",
-                                    task.completed && "line-through opacity-50"
-                                  )}>
-                                    {task.title}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        </Card>
-                      ))}
-                      {subcontracts.filter(s => s.projectId === selectedProject.id).length === 0 && (
-                        <div className="p-12 text-center bg-slate-50 rounded-3xl border border-dashed border-slate-200">
-                          <p className="text-slate-400 font-bold">Aucun contrat de sous-traitance pour ce chantier</p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {activeTab === 'tasks' && (
-                  <ProjectTasksPanel
-                    projectId={selectedProject.id}
-                    employees={employees.filter((e: any) => Number(e.projectId) === Number(selectedProject.id))}
-                    canEdit={role === 'Chef_chantier' || role === 'Directeur_technique'}
-                  />
-                )}
-
-                {activeTab === 'reports' && (
-                  <div className="space-y-6">
-                    <div className="flex items-center justify-between">
-                      <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest">Journal de Chantier Digital</h4>
-                      <Button size="sm" className="font-bold" onClick={() => setIsNewReportModalOpen(true)}>Nouveau Rapport Journalier</Button>
-                    </div>
-                    <div className="grid grid-cols-1 gap-4">
-                      {dailyReports
-                        .filter(r => r.projectId === selectedProject.id)
-                        .map((report) => (
-                          <div key={report.id} className="bg-white border border-slate-100 rounded-3xl overflow-hidden hover:shadow-xl hover:border-[var(--color-primary)] transition-all">
-                            <div 
-                              className="p-6 flex items-center justify-between cursor-pointer group"
-                              onClick={() => setExpandedReportId(expandedReportId === report.id ? null : report.id)}
-                            >
-                              <div className="flex flex-col sm:flex-row sm:items-center gap-6">
-                                <div className="w-14 h-14 bg-slate-50 rounded-2xl flex items-center justify-center text-slate-400 group-hover:bg-[var(--color-primary)] group-hover:text-white transition-colors">
-                                  <ClipboardList className="w-7 h-7" />
-                                </div>
-                                <div>
-                                  <p className="font-black text-slate-900 text-lg tracking-tight">Rapport du {new Date(report.reportDate || report.date).toLocaleDateString('fr-FR')}</p>
-                                  <div className="flex items-center gap-4 mt-1">
-                                    <span className="text-xs text-slate-500 font-bold">Rédigé par: {report.reporter}</span>
-                                  </div>
-                                </div>
-                              </div>
-                              <div className="flex flex-col sm:flex-row sm:items-center gap-6">
-                                <span className={cn(
-                                  "text-xs font-black px-3 py-1 rounded-xl uppercase tracking-wider",
-                                  report.status === 'Validé' ? "text-emerald-600 bg-emerald-50" : "text-amber-600 bg-amber-50"
-                                )}>{report.status}</span>
-                                <ChevronRight className={cn(
-                                  "w-5 h-5 text-slate-300 transition-transform duration-200",
-                                  expandedReportId === report.id ? "rotate-90 text-[var(--color-primary)]" : "group-hover:text-[var(--color-primary)]"
-                                )} />
-                              </div>
-                            </div>
-                            
-                            {/* Bloc déroulant des détails */}
-                            {expandedReportId === report.id && (
-                              <div className="px-6 pb-6 border-t border-slate-100 animate-in slide-in-from-top-2 duration-300">
-                                <div className="pt-6 space-y-4">
-                                  {/* Effectifs */}
-                                  {/* Détails principaux */}
-                                  <div className="grid grid-cols-1 gap-4">
-                                    <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
-                                      <p className="text-xs font-black text-slate-600 uppercase tracking-wider mb-2">Date du Rapport</p>
-                                      <p className="text-lg font-black text-slate-900">{new Date(report.reportDate || report.date).toLocaleDateString('fr-FR')}</p>
-                                    </div>
-                                  </div>
-                                  
-                                  {/* Travaux Réalisés */}
-                                  {report.workDone && (
-                                    <div className="p-4 bg-white rounded-xl border border-slate-200">
-                                      <p className="text-xs font-black text-slate-600 uppercase tracking-wider mb-2">Travaux Réalisés</p>
-                                      <p className="text-sm font-medium text-slate-800 whitespace-pre-wrap">{report.workDone}</p>
-                                    </div>
-                                  )}
-                                  
-                                  {/* Problèmes Rencontrés */}
-                                  {report.issuesEncountered && (
-                                    <div className="p-4 bg-white rounded-xl border border-slate-200">
-                                      <p className="text-xs font-black text-slate-600 uppercase tracking-wider mb-2">Problèmes Rencontrés</p>
-                                      <p className="text-sm font-medium text-slate-800 whitespace-pre-wrap">{report.issuesEncountered}</p>
-                                    </div>
-                                  )}
-                                  
-                                  {/* Plan du Jour Suivant */}
-                                  {report.nextDayPlan && (
-                                    <div className="p-4 bg-white rounded-xl border border-slate-200">
-                                      <p className="text-xs font-black text-slate-600 uppercase tracking-wider mb-2">Plan du Jour Suivant</p>
-                                      <p className="text-sm font-medium text-slate-800 whitespace-pre-wrap">{report.nextDayPlan}</p>
-                                    </div>
-                                  )}
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      {dailyReports.filter(r => r.projectId === selectedProject.id).length === 0 && (
-                        <div className="p-12 text-center bg-slate-50 rounded-3xl border border-dashed border-slate-200">
-                          <p className="text-slate-400 font-bold">Aucun rapport journalier pour ce chantier</p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="pt-8 border-t border-slate-100 flex justify-end gap-3 print:hidden">
-                <Button variant="outline" onClick={() => setSelectedProject(null)} className="font-bold h-12 px-6">{t('common.close')}</Button>
-                <Button onClick={handlePrint} className="font-bold h-12 px-8 shadow-lg shadow-blue-900/20">Imprimer Fiche Marché</Button>
-              </div>
-            </div>
-          </Modal>
-        )}
-
         {/* Edit Project Modal */}
         {isEditProjectModalOpen && (
           <Modal
             isOpen={isEditProjectModalOpen}
             onClose={() => setIsEditProjectModalOpen(false)}
-            title={`Modifier le Chantier: ${editingProject?.name}`}
+            title={t('projects.modals.edit_project', { name: editingProject?.name })}
             size="lg"
           >
             <form
@@ -1517,11 +992,6 @@ const today = new Date().toISOString().split('T')[0];
                 setIsUpdatingProject(true);
                 const formData = new FormData(e.currentTarget);
                 const newStatus = formData.get('status') as string;
-                // Progress uniquement si le statut change
-                const STATUS_PROGRESS: Record<string, number> = {
-                  'préparation': 0, 'lancement': 15, 'exécution': 40,
-                  'suivi': 65, 'contrôle': 85, 'clôture': 100
-                };
                 const updates: any = {
                   name: formData.get('name') as string,
                   code: formData.get('code') as string,
@@ -1534,10 +1004,6 @@ const today = new Date().toISOString().split('T')[0];
                   startDate: formData.get('start') as string,
                   endDate: formData.get('end') as string
                 };
-                // Calculer progress UNIQUEMENT si le statut a changé
-                if (newStatus !== editingProject?.status) {
-                  updates.progress = STATUS_PROGRESS[newStatus] ?? editingProject?.progress ?? 0;
-                }
                 try {
                   await updateProject(editingProject!.id, updates);
                   addLog({
@@ -1546,7 +1012,7 @@ const today = new Date().toISOString().split('T')[0];
                     details: `Chantier ${updates.name} mis à jour`,
                     type: "info"
                   });
-                  notify(`Chantier "${updates.name}" mis à jour avec succès.`, 'success', '/projects');
+                  notify(t('projects.notifications.project_updated', { name: updates.name }), 'success', '/projects');
                   setIsEditProjectModalOpen(false);
                 } catch (err: any) {
                   notify(err?.message || 'Erreur lors de la mise à jour', 'error', '/projects');
@@ -1556,31 +1022,29 @@ const today = new Date().toISOString().split('T')[0];
               }}
             >
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Input label="Nom du Projet" name="name" defaultValue={editingProject?.name} required />
-                <Input label="Code Projet" name="code" defaultValue={editingProject?.code} required />
+                <Input label={t('projects.wizard.market_label')} name="name" defaultValue={editingProject?.name} required />
+                <Input label={t('projects.wizard.market_number')} name="code" defaultValue={editingProject?.code} required />
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Input label="Client" name="client" defaultValue={editingProject?.client} required />
+                <Input label={t('projects.wizard.client_label')} name="client" defaultValue={editingProject?.client} required />
                 <div className="space-y-1.5">
-                  <label className="text-sm font-bold text-slate-700">Statut</label>
+                  <label className="text-sm font-bold text-slate-700">{t('projects.wizard.advancement_state')}</label>
                   <select
                     name="status"
                     className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                    defaultValue={editingProject?.status}
+                    defaultValue={editingProject?.status || ''}
                   >
-                    <option value="préparation">Préparation</option>
-                    <option value="lancement">Lancement</option>
-                    <option value="exécution">Exécution</option>
-                    <option value="suivi">Suivi</option>
-                    <option value="contrôle">Contrôle</option>
-                    <option value="clôture">Clôture</option>
+                    <option value="">{t('projects.wizard.advancement_start')}</option>
+                    {editTaskTitles.map((title) => (
+                      <option key={title} value={title}>{title}</option>
+                    ))}
                   </select>
                 </div>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Input label="Budget (FCFA)" name="budget" defaultValue={editingProject?.budget} required />
+                <Input label={t('projects.wizard.amount_ttc')} name="budget" defaultValue={editingProject?.budget} required />
                 <div className="space-y-1.5">
-                  <label className="text-sm font-bold text-slate-700">Région</label>
+                  <label className="text-sm font-bold text-slate-700">{t('projects.wizard.region')}</label>
                   <select
                     name="region"
                     className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
@@ -1595,7 +1059,7 @@ const today = new Date().toISOString().split('T')[0];
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-1.5">
-                  <label className="text-sm font-medium text-slate-700">Catégorie du chantier</label>
+                  <label className="text-sm font-medium text-slate-700">{t('projects.wizard.category')}</label>
                   <div className="flex flex-col gap-2">
                     <select
                       className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
@@ -1609,9 +1073,9 @@ const today = new Date().toISOString().split('T')[0];
                         }
                       }}
                     >
-                      <option value="Bâtiment">Bâtiment</option>
-                      <option value="Voirie">Voirie</option>
-                      <option value="Autre">Autre (Saisie manuelle)</option>
+                      <option value="Bâtiment">{t('projects.category.building')}</option>
+                      <option value="Voirie">{t('projects.category.road')}</option>
+                      <option value="Autre">{t('projects.wizard.category_other')}</option>
                     </select>
 
                     {((editingProject?.category !== 'Bâtiment' && editingProject?.category !== 'Voirie') || editingProject?.category === 'Autre') && (
@@ -1619,7 +1083,7 @@ const today = new Date().toISOString().split('T')[0];
                         name="category"
                         type="text"
                         className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)] animate-in fade-in slide-in-from-top-1 duration-200"
-                        placeholder="Précisez la catégorie..."
+                        placeholder={t('projects.wizard.category_placeholder')}
                         value={editingProject?.category === 'Autre' ? '' : editingProject?.category}
                         onChange={(e) => setEditingProject({ ...editingProject, category: e.target.value })}
                         required
@@ -1633,24 +1097,24 @@ const today = new Date().toISOString().split('T')[0];
                 </div>
                 {editingProject?.category === 'Bâtiment' && (
                   <div className="space-y-1.5">
-                    <label className="text-sm font-medium text-slate-700">Sous-catégorie</label>
+                    <label className="text-sm font-medium text-slate-700">{t('projects.wizard.subcategory')}</label>
                     <select
                       name="subCategory"
                       className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                       value={editingProject?.subCategory || ''}
                       onChange={(e) => setEditingProject({ ...editingProject, subCategory: e.target.value })}
                     >
-                      <option value="">— Sélectionner —</option>
-                      <option value="Gros œuvre">Gros œuvre</option>
-                      <option value="Second œuvre">Second œuvre</option>
+                      <option key="select-placeholder" value="">{t('common.select_placeholder')}</option>
+                      <option value="Gros œuvre">{t('projects.wizard.gros_oeuvre')}</option>
+                      <option value="Second œuvre">{t('projects.wizard.second_oeuvre')}</option>
                     </select>
                   </div>
                 )}
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Input label="Conducteur de Travaux" name="manager" defaultValue={editingProject?.manager} />
+                <Input label={t('projects.wizard.manager')} name="manager" defaultValue={editingProject?.manager} />
                 <div className="space-y-1.5">
-                  <label className="text-sm font-bold text-slate-700">Lieu d'Exécution</label>
+                  <label className="text-sm font-bold text-slate-700">{t('projects.wizard.location')}</label>
                   <div className="flex flex-col gap-2">
                     <select
                       className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
@@ -1665,11 +1129,11 @@ const today = new Date().toISOString().split('T')[0];
                       }}
                       required
                     >
-                      <option value="">— Sélectionner une ville —</option>
+                      <option key="city-placeholder-edit" value="">{t('projects.wizard.city_placeholder')}</option>
                       {(regionCities[editingProject?.region] || []).map(city => (
                         <option key={city} value={city}>{city}</option>
                       ))}
-                      <option value="Autre">Autre (Saisie manuelle)</option>
+                      <option value="Autre">{t('projects.wizard.location_manual')}</option>
                     </select>
                     
                     {(!regionCities[editingProject?.region]?.includes(editingProject?.location) || editingProject?.location === '') && (
@@ -1677,7 +1141,7 @@ const today = new Date().toISOString().split('T')[0];
                         name="location"
                         type="text"
                         className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)] animate-in fade-in slide-in-from-top-1 duration-200"
-                        placeholder="Saisir manuellement le lieu..."
+                        placeholder={t('projects.wizard.location_manual_placeholder')}
                         value={editingProject?.location || ''}
                         onChange={(e) => setEditingProject({ ...editingProject, location: e.target.value })}
                         required
@@ -1691,21 +1155,21 @@ const today = new Date().toISOString().split('T')[0];
                 </div>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Input label="Date Début" name="start" type="date" min={today} defaultValue={editingProject?.start} required />
-                <Input label="Date Fin Prévue" name="end" type="date" min={today} defaultValue={editingProject?.end} required />
+                <Input label={t('projects.wizard.start_date')} name="start" type="date" min={today} defaultValue={editingProject?.start} required />
+                <Input label={t('projects.details.contractual_end_date')} name="end" type="date" min={today} defaultValue={editingProject?.end} required />
               </div>
               <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
                 <Button variant="outline" type="button" onClick={() => setIsEditProjectModalOpen(false)}>{t('common.cancel')}</Button>
                 <Button variant="outline" type="button"
                   onClick={() => { loadAmendments(editingProject!.id); setIsAmendmentModalOpen(true); }}
                   className="font-bold border-amber-300 text-amber-700 hover:bg-amber-50 gap-1">
-                   Avenants {amendments.length > 0 && `(${amendments.length})`}
+                   {t('projects.modals.amendments', { name: '' }).split(' —')[0]} {amendments.length > 0 && `(${amendments.length})`}
                 </Button>
                 <Button type="submit" className="px-8 font-bold shadow-lg shadow-blue-900/20" disabled={isUpdatingProject}>
                   {isUpdatingProject ? (
                     <>
                       <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                      Traitement...
+                      {t('common.modals.processing')}
                     </>
                   ) : (
                     t('common.save')
@@ -1719,25 +1183,25 @@ const today = new Date().toISOString().split('T')[0];
         {/* Modal Avenants */}
         {isAmendmentModalOpen && editingProject && (
           <Modal isOpen={isAmendmentModalOpen} onClose={() => setIsAmendmentModalOpen(false)}
-            title={`Avenants — ${editingProject.name}`} size="lg">
+            title={t('projects.modals.amendments', { name: editingProject.name })} size="lg">
             <div className="space-y-6">
               {/* Historique */}
               <div>
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="font-black text-slate-900">Historique des avenants</h3>
-                  <span className="text-sm text-slate-500">{amendments.length} avenant(s)</span>
+                  <h3 className="font-black text-slate-900">{t('projects.details.reports.history')}</h3>
+                  <span className="text-sm text-slate-500">{amendments.length} {t('projects.modals.amendments', { name: '' }).split(' —')[0].toLowerCase()}(s)</span>
                 </div>
                 {isLoadingAmendments ? (
                   <div className="flex justify-center py-8"><div className="animate-spin h-6 w-6 border-2 border-[var(--color-primary)] border-t-transparent rounded-full" /></div>
                 ) : amendments.length === 0 ? (
-                  <div className="text-center py-8 bg-slate-50 rounded-xl text-slate-500">Aucun avenant enregistré</div>
+                  <div className="text-center py-8 bg-slate-50 rounded-xl text-slate-500">{t('projects.details.reports.no_reports')}</div>
                 ) : (
                   <div className="space-y-3 max-h-60 overflow-y-auto">
                     {amendments.map((a: any) => (
                       <div key={a.id} className="p-4 rounded-xl border border-slate-200 bg-white">
                         <div className="flex items-start justify-between">
                           <div className="flex-1">
-                            <span className="text-xs font-black uppercase tracking-widest text-slate-400">{a.type}</span>
+                            <span className="text-xs font-black uppercase tracking-widest text-slate-400">{t(`projects.pdf.${a.type.toLowerCase()}` as any) || a.type}</span>
                             <p className="text-sm font-medium text-slate-700 mt-1">{a.justification}</p>
                             {a.type === 'Délai' && a.ancienneDate && a.nouvelleDate && (
                               <p className="text-xs text-slate-500 mt-1"> {formatDateAmendment(a.ancienneDate)} &rarr; <span className="font-bold text-[var(--color-primary)]">{formatDateAmendment(a.nouvelleDate)}</span></p>
@@ -1746,8 +1210,8 @@ const today = new Date().toISOString().split('T')[0];
                               <p className="text-xs text-slate-500 mt-1"> {Number(a.ancienBudget).toLocaleString()} &rarr; <span className="font-bold text-[var(--color-primary)]">{Number(a.nouveauBudget).toLocaleString()} FCFA</span></p>
                             )}
                             
-                            {/* Boutons de validation pour le DG uniquement */}
-                            {role === 'Directeur_technique' && a.statut === 'En attente' && (
+                            {/* Validation avenant — directeur technique */}
+                            {canValidateReports && role === 'Directeur technique' && a.statut === 'En attente' && (
                               <div className="flex gap-2 mt-3">
                                 <Button 
                                   size="sm" 
@@ -1757,7 +1221,7 @@ const today = new Date().toISOString().split('T')[0];
                                   isLoading={validatingAmendments.has(a.id)}
                                   disabled={validatingAmendments.has(a.id)}
                                 >
-                                  ✓ Approuver
+                                  ✓ {t('common.modals.confirm')}
                                 </Button>
                                 <Button 
                                   size="sm" 
@@ -1767,17 +1231,17 @@ const today = new Date().toISOString().split('T')[0];
                                   isLoading={validatingAmendments.has(a.id)}
                                   disabled={validatingAmendments.has(a.id)}
                                 >
-                                  ✗ Rejeter
+                                  ✗ {t('common.modals.cancel')}
                                 </Button>
                               </div>
                             )}
                           </div>
                           <div className="flex flex-col items-end gap-2 ml-4">
                             <span className={`text-xs font-black px-2 py-1 rounded-full whitespace-nowrap ${a.statut === 'Approuvé' ? 'bg-emerald-100 text-emerald-700' : a.statut === 'Rejeté' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>
-                              {a.statut}
+                              {a.statut === 'Approuvé' ? t('finances.status.validated') : a.statut === 'Rejeté' ? t('finances.status.rejected') : t('finances.status.pending')}
                             </span>
-                            {a.statut === 'En attente' && role === 'Directeur_technique' && (
-                              <span className="text-xs text-amber-600 font-medium">En attente de validation</span>
+                            {a.statut === 'En attente' && role === 'Directeur technique' && (
+                              <span className="text-xs text-amber-600 font-medium">{t('finances.status.pending')}</span>
                             )}
                           </div>
                         </div>
@@ -1787,8 +1251,8 @@ const today = new Date().toISOString().split('T')[0];
                 )}
               </div>
 
-              {/* Formulaire nouvel avenant - uniquement pour le Chef */}
-              {role !== 'Directeur_technique' && (
+              {/* Formulaire nouvel avenant */}
+              {canManageProjects && (
                 <div className="border-t border-slate-100 pt-6">
                   <h3 className="font-black text-slate-900 mb-4">Nouvel avenant</h3>
                   <form onSubmit={handleCreateAmendment} className="space-y-4">
@@ -1823,11 +1287,11 @@ const today = new Date().toISOString().split('T')[0];
                       </div>
                     )}
                     <div className="space-y-1.5">
-                      <label className="text-sm font-bold text-slate-700">Justification <span className="text-red-500">*</span></label>
+                      <label className="text-sm font-bold text-slate-700">{t('projects.amendments.justification')} <span className="text-red-500">*</span></label>
                       <textarea value={newAmendment.justification} required
                         onChange={e => setNewAmendment(p => ({ ...p, justification: e.target.value }))}
                         className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm h-24 resize-none focus:ring-2 focus:ring-[var(--color-primary)] outline-none"
-                        placeholder="Décrivez la raison de cette modification (retards approvisionnement, intempéries, modification client...)"/>
+                        placeholder={t('projects.amendments.justification_placeholder')}/>
                     </div>
                     <div className="flex flex-col sm:flex-row sm:justify-end gap-3">
                       <Button variant="outline" type="button" onClick={() => setIsAmendmentModalOpen(false)}>{t('common.close')}</Button>
@@ -1835,10 +1299,10 @@ const today = new Date().toISOString().split('T')[0];
                         {isSubmittingAmendment ? (
                           <>
                             <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                            Traitement...
+                            {t('common.modals.processing')}
                           </>
                         ) : (
-                          "Soumettre l'avenant"
+                          t('common.send')
                         )}
                       </Button>
                     </div>
@@ -1854,7 +1318,7 @@ const today = new Date().toISOString().split('T')[0];
           <Modal
             isOpen={isGanttModalOpen}
             onClose={() => setIsGanttModalOpen(false)}
-            title={`Planning GANTT: ${ganttProject?.name}`}
+            title={t('projects.modals.gantt', { name: ganttProject?.name })}
             size="xl"
           >
             <div className="space-y-8">
@@ -1984,11 +1448,11 @@ const today = new Date().toISOString().split('T')[0];
           <Modal
             isOpen={isDeleteModalOpen}
             onClose={() => setIsDeleteModalOpen(false)}
-            title="Confirmer la suppression"
+            title={t('projects.modals.confirm_delete')}
             size="sm"
           >
             <div className="space-y-6">
-              <p className="text-sm text-slate-600">Êtes-vous sûr de vouloir supprimer le chantier <span className="font-black text-slate-900">{projectToDelete?.name}</span> ? Cette action est irréversible.</p>
+              <p className="text-sm text-slate-600">{t('projects.modals.delete_confirm_msg', { name: projectToDelete?.name })}</p>
               <div className="flex flex-col sm:flex-row sm:justify-end gap-3">
                 <Button variant="outline" onClick={() => setIsDeleteModalOpen(false)}>{t('common.cancel')}</Button>
                 <Button
@@ -1999,98 +1463,14 @@ const today = new Date().toISOString().split('T')[0];
                   {isDeletingProject ? (
                     <>
                       <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                      Suppression...
+                      {t('projects.modals.deleting')}
                     </>
                   ) : (
-                    "Supprimer"
+                    t('projects.modals.delete_btn')
                   )}
                 </Button>
               </div>
             </div>
-          </Modal>
-        )}
-        {/* New Daily Report Modal Workflow */}
-        {isNewReportModalOpen && (
-          <Modal
-            isOpen={isNewReportModalOpen}
-            onClose={() => setIsNewReportModalOpen(false)}
-            title="Saisie Journal de Chantier"
-            size="lg"
-          >
-            <form className="space-y-6" onSubmit={(e) => e.preventDefault()}>
-              <div className="grid grid-cols-1 gap-4">
-                <Input label="Date du Jour" type="date" defaultValue={new Date().toISOString().split('T')[0]} />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-sm font-bold text-slate-700">Travaux Réalisés (Tâches & PK)</label>
-                <textarea 
-                  className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium h-32 focus:ring-2 focus:ring-[var(--color-primary)] outline-none" 
-                  placeholder="Détaillez les activités du jour..."
-                  id="workDone"
-                ></textarea>
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-sm font-bold text-slate-700">Problèmes Rencontrés</label>
-                <textarea 
-                  className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium h-24 focus:ring-2 focus:ring-[var(--color-primary)] outline-none" 
-                  placeholder="Décrivez les problèmes ou incidents..."
-                  id="issuesEncountered"
-                ></textarea>
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-sm font-bold text-slate-700">Plan du Jour Suivant</label>
-                <textarea 
-                  className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium h-24 focus:ring-2 focus:ring-[var(--color-primary)] outline-none" 
-                  placeholder="Planifiez les activités de demain..."
-                  id="nextDayPlan"
-                ></textarea>
-              </div>
-              <div className="p-4 bg-blue-50 rounded-xl border border-blue-100">
-                <p className="text-xs font-bold text-blue-700">Note: Ce rapport sera transmis au Chef de Chantier pour validation.</p>
-              </div>
-              <div className="flex justify-end gap-3 pt-4">
-                <Button variant="outline" type="button" onClick={() => setIsNewReportModalOpen(false)} disabled={isSubmittingReport}>{t('common.cancel')}</Button>
-                <Button
-                  type="button"
-                  className="px-8 font-bold"
-                  onClick={async () => {
-                    setIsSubmittingReport(true);
-                    try {
-                      // Récupérer les valeurs du formulaire
-                      const workDoneEl = document.getElementById('workDone') as HTMLTextAreaElement;
-                      const issuesEncounteredEl = document.getElementById('issuesEncountered') as HTMLTextAreaElement;
-                      const nextDayPlanEl = document.getElementById('nextDayPlan') as HTMLTextAreaElement;
-                      
-                      await addDailyReport({
-                        reportDate: new Date().toISOString().split('T')[0],
-                        projectId: selectedProject.id,
-                        // ENUM DB: Brouillon / Soumis / Validé
-                        status: 'Soumis',
-                        workDone: workDoneEl?.value || '',
-                        issuesEncountered: issuesEncounteredEl?.value || '',
-                        nextDayPlan: nextDayPlanEl?.value || '',
-                        workerCount: 0 // Retiré du formulaire
-                      });
-                      addLog({
-                        action: "Nouveau rapport journalier",
-                        user: userName || "Utilisateur",
-                        details: `Rapport créé pour le chantier ${selectedProject.name}`,
-                        type: "control"
-                      });
-                      notify("Rapport journalier enregistré avec succès.", 'success', '/projects');
-                      setIsNewReportModalOpen(false);
-                    } catch (err: any) {
-                      notify(err?.message || 'Erreur lors de la soumission du rapport', 'error', '/projects');
-                    } finally {
-                      setIsSubmittingReport(false);
-                    }
-                  }}
-                  disabled={isSubmittingReport}
-                >
-                  {isSubmittingReport ? "Envoi..." : "Envoyer au Chef de Chantier"}
-                </Button>
-              </div>
-            </form>
           </Modal>
         )}
         {/* Export Gantt Modal */}
@@ -2100,7 +1480,7 @@ const today = new Date().toISOString().split('T')[0];
             setIsExportGanttModalOpen(false);
             setIsExportSuccess(false);
           }}
-          title="Exporter vers MS Project"
+          title={t('projects.modals.export_gantt')}
           size="sm"
         >
           {isExportSuccess ? (
@@ -2108,16 +1488,16 @@ const today = new Date().toISOString().split('T')[0];
               <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto">
                 <CheckCircle2 className="w-8 h-8" />
               </div>
-              <p className="text-sm text-slate-600">L'export MS Project a été généré avec succès.</p>
+              <p className="text-sm text-slate-600">{t('projects.modals.export_success') || 'Export réussi'}</p>
               <Button className="w-full font-bold" onClick={() => {
                 setIsExportGanttModalOpen(false);
                 setIsExportSuccess(false);
-              }}>Télécharger le fichier .mpp</Button>
+              }}>{t('projects.details.download_mpp')}</Button>
             </div>
           ) : (
             <div className="space-y-6">
               <div className="space-y-1.5">
-                <label className="text-sm font-bold text-slate-700">Format d'export</label>
+                <label className="text-sm font-bold text-slate-700">{t('projects.modals.export_format') || 'Format d\'export'}</label>
                 <select className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]">
                   <option>MS Project XML (.xml)</option>
                   <option>MS Project (.mpp)</option>
@@ -2125,11 +1505,11 @@ const today = new Date().toISOString().split('T')[0];
                 </select>
               </div>
               <div className="space-y-1.5">
-                <label className="text-sm font-bold text-slate-700">Période</label>
+                <label className="text-sm font-bold text-slate-700">{t('projects.details.period')}</label>
                 <select className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]">
-                  <option>Projet complet</option>
-                  <option>3 prochains mois</option>
-                  <option>Mois en cours</option>
+                  <option>{t('common.all_sites')}</option>
+                  <option>{t('projects.details.next_3_months')}</option>
+                  <option>{t('projects.details.current_month')}</option>
                 </select>
               </div>
               <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
@@ -2141,10 +1521,10 @@ const today = new Date().toISOString().split('T')[0];
 
                     // Prepare tasks for export
                     const tasksToExport = [
-                      { task: 'Terrassement & Fouilles', start: 0, duration: 2, progress: 100 },
-                      { task: 'Ouvrages d\'Art (Dalots)', start: 1, duration: 3, progress: 60 },
-                      { task: 'Couche de Fondation', start: 3, duration: 2, progress: 20 },
-                      { task: 'Bitumage (BB)', start: 5, duration: 1, progress: 0 },
+                      { task: t('projects.export_tasks.earthworks'), start: 0, duration: 2, progress: 100 },
+                      { task: t('projects.export_tasks.artworks'), start: 1, duration: 3, progress: 60 },
+                      { task: t('projects.export_tasks.foundation'), start: 3, duration: 2, progress: 20 },
+                      { task: t('projects.export_tasks.pavement'), start: 5, duration: 1, progress: 0 },
                     ].map(t => ({
                       'ACTIVITÉ / TÂCHE': t.task,
                       'DÉBUT (MOIS)': t.start + 1,
@@ -2160,7 +1540,7 @@ const today = new Date().toISOString().split('T')[0];
                   }}
                   disabled={isExportingGantt}
                 >
-                  {isExportingGantt ? "Génération..." : "Générer l'export"}
+                  {isExportingGantt ? t('common.modals.processing') : t('projects.modals.generate_export') || 'Générer l\'export'}
                 </Button>
               </div>
             </div>
@@ -2171,7 +1551,7 @@ const today = new Date().toISOString().split('T')[0];
         <Modal
           isOpen={isAddTaskModalOpen}
           onClose={() => setIsAddTaskModalOpen(false)}
-          title="Ajouter une Tâche"
+          title={t('projects.modals.add_task')}
           size="md"
         >
           <form className="space-y-6" onSubmit={(e) => {
@@ -2179,39 +1559,38 @@ const today = new Date().toISOString().split('T')[0];
             setIsAddTaskModalOpen(false);
             // task added
           }}>
-            <Input label="Nom de la tâche" required />
+            <Input label={t('projects.tasks.table.task')} required />
             <div className="space-y-1.5">
-              <label className="text-sm font-bold text-slate-700">Lot / Phase</label>
+              <label className="text-sm font-bold text-slate-700">{t('projects.wizard.category')}</label>
               <select className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]">
-                <option>Terrassement</option>
-                <option>Ouvrages d'Art</option>
-                <option>Chaussée</option>
-                <option>Signalisation</option>
+                <option>{t('projects.export_tasks.earthworks').split(' &')[0]}</option>
+                <option>{t('projects.export_tasks.artworks').split(' (')[0]}</option>
+                <option>{t('projects.category.pavement')}</option>
+                <option>{t('common.not_specified')}</option>
               </select>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Input label="Date de début" type="date" min={today} required />
-              <Input label="Date de fin" type="date" min={today} required />
+              <Input label={t('projects.wizard.start_date')} type="date" min={today} required />
+              <Input label={t('projects.details.contractual_end_date')} type="date" min={today} required />
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Input label="Responsable" required />
+              <Input label={t('projects.tasks.table.responsible')} required />
               <div className="space-y-1.5">
-                <label className="text-sm font-bold text-slate-700">Statut</label>
+                <label className="text-sm font-bold text-slate-700">{t('projects.tasks.table.status')}</label>
                 <select className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]">
-                  <option>À faire</option>
-                  <option>En cours</option>
-                  <option>Terminé</option>
+                  <option>{t('projects.tasks.status.to_do')}</option>
+                  <option>{t('projects.tasks.status.in_progress')}</option>
+                  <option>{t('projects.tasks.status.done')}</option>
                 </select>
               </div>
             </div>
             <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
               <Button variant="outline" type="button" onClick={() => setIsAddTaskModalOpen(false)}>{t('common.cancel')}</Button>
-              <Button type="submit" className="font-bold">Ajouter la tâche</Button>
+              <Button type="submit" className="font-bold">{t('projects.tasks.add_task')}</Button>
             </div>
           </form>
         </Modal>
 
-      </AnimatePresence>
     </div>
   );
 };

@@ -66,9 +66,19 @@ db.Attendance.belongsTo(db.Project, { foreignKey: 'projectId', as: 'project' });
 db.Project.hasMany(db.Equipment, { foreignKey: 'projectId', as: 'equipment' });
 db.Equipment.belongsTo(db.Project, { foreignKey: 'projectId', as: 'project' });
 
+// Project → EquipmentRequests
+db.Project.hasMany(db.EquipmentRequest, { foreignKey: 'projectId', as: 'equipmentRequests', onDelete: 'RESTRICT' });
+db.EquipmentRequest.belongsTo(db.Project, { foreignKey: 'projectId', as: 'project' });
+
 // Project → StockMovements
 db.Project.hasMany(db.StockMovement, { foreignKey: 'projectId', as: 'stockMovements', onDelete: 'CASCADE' });
 db.StockMovement.belongsTo(db.Project, { foreignKey: 'projectId', as: 'project' });
+
+// Stock materials (catalogue)
+db.Project.hasMany(db.StockMaterial, { foreignKey: 'projectId', as: 'stockMaterials', onDelete: 'CASCADE' });
+db.StockMaterial.belongsTo(db.Project, { foreignKey: 'projectId', as: 'project' });
+db.StockMaterial.hasMany(db.StockMovement, { foreignKey: 'materialId', as: 'movements' });
+db.StockMovement.belongsTo(db.StockMaterial, { foreignKey: 'materialId', as: 'material' });
 
 // Project → Purchases
 db.Project.hasMany(db.Purchase, { foreignKey: 'projectId', as: 'purchases', onDelete: 'CASCADE' });
@@ -103,6 +113,28 @@ db.DailyReport.belongsTo(db.Project, { foreignKey: 'projectId', as: 'project' })
 // Project → Documents
 db.Project.hasMany(db.Document, { foreignKey: 'projectId', as: 'documents' });
 db.Document.belongsTo(db.Project, { foreignKey: 'projectId', as: 'project' });
+
+// Project → Fixed costs (charges fixes)
+db.Project.hasMany(db.ProjectFixedCost, { foreignKey: 'projectId', as: 'fixedCosts', onDelete: 'CASCADE' });
+db.ProjectFixedCost.belongsTo(db.Project, { foreignKey: 'projectId', as: 'project' });
+
+// Project → Quotes (devis chantier)
+db.Project.hasMany(db.ProjectQuote, { foreignKey: 'projectId', as: 'quotes', onDelete: 'CASCADE' });
+db.ProjectQuote.belongsTo(db.Project, { foreignKey: 'projectId', as: 'project' });
+
+// Production V2 — recettes & consommations
+db.ProductionRecipe.hasMany(db.ProductionRecipeLine, { foreignKey: 'recipeId', as: 'lines', onDelete: 'CASCADE' });
+db.ProductionRecipeLine.belongsTo(db.ProductionRecipe, { foreignKey: 'recipeId', as: 'recipe' });
+db.ProductionRecipeLine.belongsTo(db.StockMaterial, { foreignKey: 'materialId', as: 'material' });
+db.ProductionRecipe.belongsTo(db.StockMaterial, { foreignKey: 'finishedMaterialId', as: 'finishedMaterial' });
+
+db.ProductionRecipe.hasMany(db.ProductionEntry, { foreignKey: 'recipeId', as: 'entries' });
+db.ProductionEntry.belongsTo(db.ProductionRecipe, { foreignKey: 'recipeId', as: 'recipe' });
+db.ProductionEntry.belongsTo(db.StockMaterial, { foreignKey: 'finishedMaterialId', as: 'finishedMaterial' });
+db.ProductionEntry.hasMany(db.ProductionEntryConsumption, { foreignKey: 'entryId', as: 'consumptions', onDelete: 'CASCADE' });
+db.ProductionEntryConsumption.belongsTo(db.ProductionEntry, { foreignKey: 'entryId', as: 'entry' });
+db.ProductionEntryConsumption.belongsTo(db.StockMaterial, { foreignKey: 'materialId', as: 'material' });
+db.ProductionEntryConsumption.belongsTo(db.StockMovement, { foreignKey: 'stockMovementId', as: 'stockMovement' });
 
 db.sequelize = sequelize;
 db.Sequelize = Sequelize;

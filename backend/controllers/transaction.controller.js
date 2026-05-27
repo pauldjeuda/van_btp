@@ -1,35 +1,14 @@
 const db = require('../models');
 const asyncHandler = require('../middlewares/asyncHandler');
 const { success, created, notFound, badRequest } = require('../utils/response');
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+const { buildAccountingEntries } = require('./transaction.controller.helpers');
+const accountingIntegration = require('../services/accountingIntegration.service');
 
 const logAction = (action, entityId, req) =>
   db.Log.create({
     action, module: 'Finances', entityType: 'Transaction', entityId,
     userId: req.user.id, userRole: req.role, userMatricule: req.user.matricule,
   });
-
-const buildAccountingEntries = (transaction, body) => {
-  const { type, amount, projectId, transactionDate: journalDate, reference: ref } = transaction;
-  const base = { transactionId: transaction.id, projectId, journalDate, reference: ref, createdBy: body.createdBy };
-
-  if (type === 'invoice') {
-    const label = `Facture ${ref} - ${body.client || 'Client'}`;
-    return [
-      { ...base, label, account: '411', accountLabel: 'Clients', debit: parseFloat(amount), credit: 0 },
-      { ...base, label, account: '706', accountLabel: 'Prestations de services', debit: 0, credit: parseFloat(amount) },
-    ];
-  }
-
-  const label = `Dépense ${ref} - ${body.provider || 'Fournisseur'}`;
-  return [
-    { ...base, label, account: '601', accountLabel: 'Achats matières', debit: parseFloat(amount), credit: 0 },
-    { ...base, label, account: '401', accountLabel: 'Fournisseurs', debit: 0, credit: parseFloat(amount) },
-  ];
-};
-
-// ─── Controllers ──────────────────────────────────────────────────────────────
 
 exports.getAll = asyncHandler(async (req, res) => {
   const where = {};
@@ -39,7 +18,7 @@ exports.getAll = asyncHandler(async (req, res) => {
 
   if (req.role === 'Chef_chantier') {
     const projects = await db.Project.findAll({ where: { chefId: req.user.id }, attributes: ['id'] });
-    where.projectId = projects.map(p => p.id);
+    where.projectId = projects.map((p) => p.id);
   }
 
   const transactions = await db.Transaction.findAll({
@@ -59,29 +38,58 @@ exports.create = asyncHandler(async (req, res) => {
   const prefix = type === 'expense' ? 'DEP' : 'FAC';
   const reference = `${prefix}-${Date.now()}`;
 
+  const chefExpensePending = req.role === 'Chef_chantier' && type === 'expense';
+  const status = chefExpensePending
+    ? 'En attente'
+    : (req.body.status || (type === 'expense' ? 'Validé' : 'En attente'));
+
   const transaction = await db.Transaction.create({
     ...req.body,
     reference,
+    status,
     createdBy: req.user.id,
     isClientDebt: req.body.isClientDebt || false,
     debtStatus: req.body.isClientDebt ? 'Non remboursé' : null,
   });
 
   await logAction(
-    `Nouvelle ${type === 'expense' ? 'dépense' : 'facture'} : ${amount} FCFA`,
-    transaction.id, req
+    chefExpensePending
+      ? `Dépense soumise pour validation DG : ${amount} FCFA`
+      : `Nouvelle ${type === 'expense' ? 'dépense' : 'facture'} : ${amount} FCFA`,
+    transaction.id,
+    req
   );
 
-  await db.AccountingEntry.bulkCreate(
-    buildAccountingEntries(transaction, { ...req.body, createdBy: req.user.id })
-  );
+  if (status === 'Validé' || status === 'Payé') {
+    await db.AccountingEntry.bulkCreate(
+      buildAccountingEntries(transaction, { ...req.body, createdBy: req.user.id })
+    );
+    const project = await db.Project.findByPk(transaction.projectId);
+    void accountingIntegration.postBtpCost({
+      type: transaction.type === 'expense' ? 'PROJECT_COST' : 'EVENTUAL_CHARGE',
+      sourceId: transaction.id,
+      reference: transaction.reference,
+      entryDate: transaction.transactionDate,
+      amount: transaction.amount,
+      label: transaction.description || transaction.category,
+      provider: transaction.provider,
+      ...accountingIntegration.projectPayload(project),
+    });
+  }
 
-  return created(res, transaction, 'Transaction enregistrée');
+  return created(
+    res,
+    transaction,
+    chefExpensePending ? 'Dépense soumise — en attente de validation du directeur' : 'Transaction enregistrée'
+  );
 });
 
 exports.update = asyncHandler(async (req, res) => {
   const transaction = await db.Transaction.findByPk(req.params.id);
   if (!transaction) return notFound(res, 'Transaction introuvable');
+  if (req.role === 'Chef_chantier' && transaction.status !== 'En attente') {
+    return badRequest(res, 'Modification impossible après validation');
+  }
   await transaction.update(req.body);
   return success(res, transaction, 'Transaction mise à jour');
 });

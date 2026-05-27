@@ -35,7 +35,7 @@ export const useResourcesState = (role: string | null, firstProjectId: number = 
   const [isFullLogbookModalOpen,    setIsFullLogbookModalOpen]    = useState(false);
   const [isInventoryModalOpen,      setIsInventoryModalOpen]      = useState(false);
   const [selectedStockProject,      setSelectedStockProject]      = useState<number | null>(null);
-  const [stockView,                 setStockView]                 = useState<StockView>('projects');
+  const [stockView,                 setStockView]                 = useState<StockView>(role === 'Gestionnaire de stocks' ? 'warehouse' : 'projects');
 
   // ── Équipements ─────────────────────────────────────────────────────────────
   const [isEquipmentModalOpen,       setIsEquipmentModalOpen]       = useState(false);

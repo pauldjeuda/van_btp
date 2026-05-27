@@ -2,6 +2,12 @@ const asyncHandler = require('../middlewares/asyncHandler');
 const path = require('path');
 const db = require('../models');
 const { success, created, notFound, error, badRequest } = require('../utils/response');
+const {
+  displayNameFromTokenUser,
+  enrichIncidentWithReporter,
+  enrichIncidentsWithReporter,
+} = require('../utils/resolveUserDisplayName');
+const { normalizeGravity, parseProjectId, serializeIncidentForApi } = require('../utils/incidentHelpers');
 
 exports.getAll = asyncHandler(async (req, res) => {
   const where = {};
@@ -12,10 +18,6 @@ exports.getAll = asyncHandler(async (req, res) => {
     const projects = await db.Project.findAll({ where: { chefId: req.user.id }, attributes: ['id'] });
     if (!req.query.projectId) where.projectId = projects.map(p => p.id);
   }
-  if (req.role === 'Technicien_chantier') {
-    const emp = await db.Employee.findOne({ where: { matricule: req.user.matricule } });
-    if (emp?.projectId) where.projectId = emp.projectId;
-  }
   const incidents = await db.Incident.findAll({
     where,
     include: [
@@ -24,7 +26,8 @@ exports.getAll = asyncHandler(async (req, res) => {
     ],
     order: [['incidentDate', 'DESC']],
   });
-  return success(res, incidents);
+  const enriched = await enrichIncidentsWithReporter(incidents);
+  return success(res, enriched);
 });
 
 exports.getById = asyncHandler(async (req, res) => {
@@ -35,17 +38,43 @@ exports.getById = asyncHandler(async (req, res) => {
     ],
   });
   if (!incident) return notFound(res, 'Incident introuvable');
-  return success(res, incident);
+  const enriched = await enrichIncidentWithReporter(incident);
+  return success(res, enriched);
 });
 
 exports.create = asyncHandler(async (req, res) => {
-  const { title, category, projectId, incidentDate } = req.body;
+  const { title, category, incidentDate } = req.body;
+  const projectId = parseProjectId(req.body.projectId);
   if (!title || !category || !projectId || !incidentDate) {
-    return badRequest(res, 'Titre, catégorie, projet et date sont obligatoires');
+    return badRequest(res, 'Titre, catégorie, chantier et date sont obligatoires');
   }
-  const imageUrl = req.file ? `/uploads/incidents/${req.file.filename}` : null;
+
+  const project = await db.Project.findByPk(projectId);
+  if (!project) return notFound(res, 'Chantier introuvable');
+
+  if (req.role === 'Chef_chantier' && Number(project.chefId) !== Number(req.user.id)) {
+    return error(res, 'Vous ne pouvez déclarer un incident que sur vos chantiers', 403);
+  }
+
+  const files = req.files?.length ? req.files : (req.file ? [req.file] : []);
+  const imagePaths = files.map((f) => `/uploads/incidents/${f.filename}`);
+  const imageUrl = imagePaths[0] || null;
+  const images = imagePaths;
+
   const incident = await db.Incident.create({
-    ...req.body, imageUrl, reporterId: req.user.id,
+    title: String(title).trim(),
+    type: req.body.type || null,
+    category,
+    gravity: normalizeGravity(req.body.gravity),
+    description: req.body.description || null,
+    status: req.body.status || 'Ouvert',
+    actionPlan: req.body.actionPlan || null,
+    impact: req.body.impact || null,
+    incidentDate,
+    projectId,
+    imageUrl,
+    images,
+    reporterId: req.user.id,
   });
   await db.IncidentHistory.create({
     action: 'Déclaration de l\'incident',
@@ -57,7 +86,18 @@ exports.create = asyncHandler(async (req, res) => {
     module: 'Contrôle', entityType: 'Incident', entityId: incident.id,
     userId: req.user.id, userRole: req.role, userMatricule: req.user.matricule,
   });
-  return created(res, incident, 'Incident déclaré avec succès');
+  const withReporter = serializeIncidentForApi({
+    ...incident.toJSON(),
+    images: incident.images || images,
+    reporter: displayNameFromTokenUser(req.user),
+    history: [{
+      action: 'Déclaration de l\'incident',
+      incidentId: incident.id,
+      userId: req.user.id,
+      userRole: req.role,
+    }],
+  });
+  return created(res, withReporter, 'Incident déclaré avec succès');
 });
 
 exports.update = asyncHandler(async (req, res) => {
@@ -73,5 +113,12 @@ exports.update = asyncHandler(async (req, res) => {
       userId: req.user.id, userRole: req.role,
     });
   }
-  return success(res, incident, 'Incident mis à jour');
+  const reloaded = await db.Incident.findByPk(incident.id, {
+    include: [
+      { model: db.Project, as: 'project', attributes: ['id', 'name'] },
+      { model: db.IncidentHistory, as: 'history', order: [['createdAt', 'ASC']] },
+    ],
+  });
+  const enriched = await enrichIncidentWithReporter(reloaded);
+  return success(res, enriched, 'Incident mis à jour');
 });

@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import { Card, Button, Input, Modal, cn } from '../../components/ui';
 import { useTranslation } from 'react-i18next';
-import { 
-  FileText, 
-  Folder, 
-  Search, 
-  Upload, 
-  MoreVertical, 
-  Download, 
+import {
+  FileText,
+  Folder,
+  Search,
+  Upload,
+  MoreVertical,
+  Download,
   Share2,
   Users,
   LifeBuoy,
@@ -36,6 +36,7 @@ import { useData } from '../../context/DataContext';
 import { useNotification } from '../../context/NotificationContext';
 import { documentService } from '../../services/document.service';
 import { TabButton, FolderCard, TicketRow, ReferentialCard, ContactItem } from './SupportComponents';
+import { DocumentViewer } from './DocumentViewer';
 
 export const SupportPage = () => {
   const { t } = useTranslation();
@@ -73,6 +74,7 @@ export const SupportPage = () => {
   const [isMoreMenuOpen, setIsMoreMenuOpen] = useState<number | null>(null);
   const [selectedReferential, setSelectedReferential] = useState<any>(null);
   const [docSearch, setDocSearch] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const [newTicket, setNewTicket] = useState({
     title: '',
@@ -116,7 +118,7 @@ export const SupportPage = () => {
       await documentService.download(doc.id, doc.name || 'document');
       notify(t('support.upload.download'), 'info', '/support');
     } catch {
-      notify('Erreur lors du téléchargement', 'error', '/support');
+      notify(t('support.modals.download_error'), 'error', '/support');
     }
   };
 
@@ -146,10 +148,10 @@ export const SupportPage = () => {
         await addDocument({
           ...newDocument,
           type: newDocument.folder === 'Plans & Techniques' ? 'Plan'
-              : newDocument.folder === 'Contrats & Marchés' ? 'Contrat'
+            : newDocument.folder === 'Contrats & Marchés' ? 'Contrat'
               : newDocument.folder === 'Factures & Devis' ? 'Facture'
-              : newDocument.folder === 'Photos Chantier' ? 'Photo'
-              : 'Autre',
+                : newDocument.folder === 'Photos Chantier' ? 'Photo'
+                  : 'Autre',
         });
         setUploadStep(2);
       } catch (err: any) {
@@ -189,7 +191,7 @@ export const SupportPage = () => {
             <MessageSquare className="w-5 h-5 mr-2" />
             {t('support.open_ticket')}
           </Button>
-          {(role === 'Directeur_technique' || role === 'Chef_chantier' || role === 'RH') && (
+          {(role === 'Directeur technique' || role === 'Chef_chantier') && (
             <Button onClick={() => setIsUploadModalOpen(true)} className="shadow-lg shadow-blue-900/20 h-12 px-6 font-bold bg-[var(--color-primary)]">
               <Upload className="w-5 h-5 mr-2" />
               {t('common.upload_document')}
@@ -200,23 +202,23 @@ export const SupportPage = () => {
 
       {/* Main Tabs */}
       <div className="flex border-b border-slate-200 overflow-x-auto no-scrollbar">
-        <TabButton 
-          active={activeTab === 'ged'} 
-          onClick={() => setActiveTab('ged')} 
-          icon={Folder} 
-          label={t('common.ged_management')} 
+        <TabButton
+          active={activeTab === 'ged'}
+          onClick={() => setActiveTab('ged')}
+          icon={Folder}
+          label={t('common.ged_management')}
         />
-        <TabButton 
-          active={activeTab === 'tickets'} 
-          onClick={() => setActiveTab('tickets')} 
-          icon={MessageSquare} 
-          label={t('common.technical_support')} 
+        <TabButton
+          active={activeTab === 'tickets'}
+          onClick={() => setActiveTab('tickets')}
+          icon={MessageSquare}
+          label={t('common.technical_support')}
         />
       </div>
 
       <AnimatePresence mode="wait">
         {activeTab === 'ged' && (
-          <motion.div 
+          <motion.div
             key="ged"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -238,12 +240,12 @@ export const SupportPage = () => {
                 <div className="flex items-center gap-3">
                   <div className="relative">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                    <input 
-                      type="text" 
-                      placeholder={t('support.search_placeholder')} 
+                    <input
+                      type="text"
+                      placeholder={t('support.search_placeholder')}
                       value={docSearch}
-                      onChange={(e) => setDocSearch(e.target.value)} 
-                      className="pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold outline-none focus:ring-2 focus:ring-[var(--color-primary)] w-64" 
+                      onChange={(e) => setDocSearch(e.target.value)}
+                      className="pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold outline-none focus:ring-2 focus:ring-[var(--color-primary)] w-64"
                     />
                   </div>
                 </div>
@@ -261,11 +263,16 @@ export const SupportPage = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                      {documents
-                      .filter(doc => doc.name.toLowerCase().includes(docSearch.toLowerCase()) || getProjectNameById(projects, doc.projectId || 0).toLowerCase().includes(docSearch.toLowerCase()))
+                    {documents
+                      .filter(doc => {
+                        const name = (doc.name || '').toLowerCase();
+                        const projectLabel = getProjectNameById(projects, doc.projectId || 0).toLowerCase();
+                        const q = docSearch.toLowerCase();
+                        return name.includes(q) || projectLabel.includes(q);
+                      })
                       .map((doc, i) => (
-                        <tr 
-                          key={`doc-${i}`} 
+                        <tr
+                          key={doc.id != null ? `doc-${doc.id}` : `doc-row-${i}`}
                           className="hover:bg-slate-50/50 transition-colors group cursor-pointer"
                           onClick={() => setSelectedDoc(doc)}
                         >
@@ -273,8 +280,8 @@ export const SupportPage = () => {
                             <div className="flex items-center gap-3">
                               <div className={cn(
                                 "p-2 rounded-lg",
-                                doc.type === 'PDF' ? "bg-red-50 text-red-600" : 
-                                doc.type === 'Excel' ? "bg-emerald-50 text-emerald-600" : "bg-blue-50 text-blue-600"
+                                doc.type === 'PDF' ? "bg-red-50 text-red-600" :
+                                  doc.type === 'Excel' ? "bg-emerald-50 text-emerald-600" : "bg-blue-50 text-blue-600"
                               )}>
                                 <FileText className="w-4 h-4" />
                               </div>
@@ -295,7 +302,7 @@ export const SupportPage = () => {
                                   <div className="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-100 z-50 p-2">
                                     <button className="w-full text-left px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50 rounded-lg">Renommer</button>
                                     <button className="w-full text-left px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50 rounded-lg">Déplacer</button>
-                                    {(role === 'Directeur_technique' || role === 'Chef_chantier' || role === 'RH') && (
+                                    {(role === 'Directeur technique' || role === 'Chef_chantier') && (
                                       <button className="w-full text-left px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50 rounded-lg">Archiver</button>
                                     )}
                                     <button className="w-full text-left px-4 py-2 text-sm font-bold text-red-600 hover:bg-red-50 rounded-lg">{t('common.delete')}</button>
@@ -315,7 +322,7 @@ export const SupportPage = () => {
         )}
 
         {activeTab === 'tickets' && (
-          <motion.div 
+          <motion.div
             key="tickets"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -331,14 +338,14 @@ export const SupportPage = () => {
                   </div>
                 </div>
                 <div className="space-y-4">
-                  {tickets.map((ticket) => (
-                    <TicketRow 
-                      key={ticket.id}
-                      id={ticket.id} 
-                      title={ticket.title} 
-                      status={ticket.status} 
-                      priority={ticket.priority} 
-                      date={ticket.date} 
+                  {tickets.map((ticket, idx) => (
+                    <TicketRow
+                      key={ticket.id ? `ticket-${ticket.id}` : `ticket-${idx}`}
+                      id={ticket.id}
+                      title={ticket.title}
+                      status={ticket.status}
+                      priority={ticket.priority}
+                      date={ticket.date}
                     />
                   ))}
                 </div>
@@ -384,10 +391,10 @@ export const SupportPage = () => {
           </motion.div>
         )}
       </AnimatePresence>
-      <Modal 
-        isOpen={isUploadModalOpen} 
-        onClose={() => setIsUploadModalOpen(false)} 
-        title="Archivage Documentaire Sécurisé"
+      <Modal
+        isOpen={isUploadModalOpen}
+        onClose={() => setIsUploadModalOpen(false)}
+        title={t('support.upload.title')}
       >
         <div className="space-y-8">
           <div className="flex items-center justify-between px-12 relative">
@@ -408,9 +415,9 @@ export const SupportPage = () => {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-1.5">
                     <label className="text-sm font-bold text-slate-700">{t('support.doc_type')}</label>
-                    <select 
+                    <select
                       value={newDocument.folder}
-                      onChange={(e) => setNewDocument({...newDocument, folder: e.target.value})}
+                      onChange={(e) => setNewDocument({ ...newDocument, folder: e.target.value })}
                       className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                     >
                       <option>Plans & Techniques</option>
@@ -421,9 +428,9 @@ export const SupportPage = () => {
                   </div>
                   <div className="space-y-1.5">
                     <label className="text-sm font-bold text-slate-700">Chantier rattaché</label>
-                    <select 
+                    <select
                       value={newDocument.projectId}
-                      onChange={(e) => setNewDocument({...newDocument, projectId: Number(e.target.value)})}
+                      onChange={(e) => setNewDocument({ ...newDocument, projectId: Number(e.target.value) })}
                       className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                     >
                       <option value={0}>Aucun (Document général)</option>
@@ -433,36 +440,36 @@ export const SupportPage = () => {
                     </select>
                   </div>
                 </div>
-                
+
                 <div className="space-y-1.5">
                   <label className="text-sm font-bold text-slate-700">{t('support.doc_name')}</label>
-                  <Input 
-                    placeholder="Ex: Plan de masse" 
+                  <Input
+                    placeholder="Ex: Plan de masse"
                     value={newDocument.name}
-                    onChange={(e) => setNewDocument({...newDocument, name: e.target.value})}
+                    onChange={(e) => setNewDocument({ ...newDocument, name: e.target.value })}
                   />
                 </div>
 
                 <div className="space-y-1.5">
                   <label className="text-sm font-bold text-slate-700">{t('support.doc_note')}</label>
-                  <textarea 
+                  <textarea
                     className="w-full h-24 p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                     placeholder="Ajoutez une description pour faciliter la recherche..."
                     value={newDocument.description}
-                    onChange={(e) => setNewDocument({...newDocument, description: e.target.value})}
+                    onChange={(e) => setNewDocument({ ...newDocument, description: e.target.value })}
                   ></textarea>
                 </div>
 
                 <div className="space-y-1.5">
                   <label className="text-sm font-bold text-slate-700">Sélectionner le Document</label>
-                  <div 
+                  <div
                     className="border-2 border-dashed border-slate-200 rounded-3xl p-8 text-center hover:border-[var(--color-primary)] transition-all cursor-pointer bg-slate-50/50 group relative"
                     onClick={() => document.getElementById('file-upload-input')?.click()}
                   >
-                    <input 
+                    <input
                       id="file-upload-input"
-                      type="file" 
-                      className="hidden" 
+                      type="file"
+                      className="hidden"
                       onChange={(e) => {
                         const file = e.target.files?.[0];
                         if (file) {
@@ -496,22 +503,22 @@ export const SupportPage = () => {
                   <FileText className="w-10 h-10" />
                 </div>
                 <h4 className="text-2xl font-black text-slate-900 tracking-tight">{t('support.archived')}</h4>
-                <p className="text-slate-500 font-medium max-w-xs mx-auto">Le document a été indexé et rattaché au projet sélectionné avec succès.</p>
+                <p className="text-slate-500 font-medium max-w-xs mx-auto">{t('support.modals.indexed_success')}</p>
               </div>
             )}
 
             <div className="pt-6 border-t border-slate-100 flex justify-between">
               <Button variant="outline" type="button" onClick={() => uploadStep > 1 ? setUploadStep(1) : setIsUploadModalOpen(false)} className="font-bold">
-                {uploadStep === 1 ? 'Annuler' : 'Précédent'}
+                {uploadStep === 1 ? t('common.cancel') : t('common.modals.previous')}
               </Button>
               <Button type="submit" className="px-8 font-bold shadow-lg shadow-blue-900/20" disabled={isSubmitting}>
                 {isSubmitting ? (
                   <>
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                    Traitement...
+                    {t('common.modals.processing')}
                   </>
                 ) : (
-                  uploadStep === 2 ? 'Fermer' : 'Lancer l\'Upload'
+                  uploadStep === 2 ? t('common.close') : t('common.modals.launch_upload')
                 )}
               </Button>
             </div>
@@ -520,10 +527,10 @@ export const SupportPage = () => {
       </Modal>
 
       {/* Ticket Modal (Workflow) */}
-      <Modal 
-        isOpen={isTicketModalOpen} 
-        onClose={() => setIsTicketModalOpen(false)} 
-        title="Ouvrir un Ticket Support Technique"
+      <Modal
+        isOpen={isTicketModalOpen}
+        onClose={() => setIsTicketModalOpen(false)}
+        title={t('support.open_ticket')}
       >
         <div className="space-y-8">
           <div className="flex items-center justify-between px-12 relative">
@@ -543,20 +550,20 @@ export const SupportPage = () => {
               <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
                 <div className="space-y-1.5">
                   <label className="text-sm font-bold text-slate-700">{t('support.subject')}</label>
-                  <Input 
-                    placeholder="Ex: Bug affichage planning" 
-                    required 
+                  <Input
+                    placeholder="Ex: Bug affichage planning"
+                    required
                     value={newTicket.title}
-                    onChange={(e) => setNewTicket({...newTicket, title: e.target.value})}
+                    onChange={(e) => setNewTicket({ ...newTicket, title: e.target.value })}
                   />
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-1.5">
                     <label className="text-sm font-bold text-slate-700">Module concerné</label>
-                    <select 
+                    <select
                       className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                       value={newTicket.module}
-                      onChange={(e) => setNewTicket({...newTicket, module: e.target.value})}
+                      onChange={(e) => setNewTicket({ ...newTicket, module: e.target.value })}
                     >
                       <option>Tableau de bord</option>
                       <option>Chantiers</option>
@@ -567,10 +574,10 @@ export const SupportPage = () => {
                   </div>
                   <div className="space-y-1.5">
                     <label className="text-sm font-bold text-slate-700">Priorité</label>
-                    <select 
+                    <select
                       className="w-full h-11 px-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                       value={newTicket.priority}
-                      onChange={(e) => setNewTicket({...newTicket, priority: e.target.value})}
+                      onChange={(e) => setNewTicket({ ...newTicket, priority: e.target.value })}
                     >
                       <option>Basse</option>
                       <option>Moyenne</option>
@@ -581,12 +588,12 @@ export const SupportPage = () => {
                 </div>
                 <div className="space-y-1.5">
                   <label className="text-sm font-bold text-slate-700">{t('support.detailed_desc')}</label>
-                  <textarea 
+                  <textarea
                     className="w-full h-32 p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                     placeholder="Décrivez précisément votre problème ou votre besoin..."
                     required
                     value={newTicket.description}
-                    onChange={(e) => setNewTicket({...newTicket, description: e.target.value})}
+                    onChange={(e) => setNewTicket({ ...newTicket, description: e.target.value })}
                   ></textarea>
                 </div>
               </div>
@@ -598,22 +605,22 @@ export const SupportPage = () => {
                   <CheckCircle2 className="w-10 h-10" />
                 </div>
                 <h4 className="text-2xl font-black text-slate-900 tracking-tight">{t('support.ticket_sent')}</h4>
-                <p className="text-slate-500 font-medium max-w-xs mx-auto">Votre demande a été enregistrée. Un technicien VAN BTP vous contactera sous 2 heures ouvrables.</p>
+                <p className="text-slate-500 font-medium max-w-xs mx-auto">{t('support.modals.ticket_contact')}</p>
               </div>
             )}
 
             <div className="pt-6 border-t border-slate-100 flex justify-between">
               <Button variant="outline" type="button" onClick={() => ticketStep > 1 ? setTicketStep(1) : setIsTicketModalOpen(false)} className="font-bold">
-                {ticketStep === 1 ? 'Annuler' : 'Précédent'}
+                {ticketStep === 1 ? t('common.cancel') : t('common.modals.previous')}
               </Button>
               <Button type="submit" className="px-8 font-bold shadow-lg shadow-blue-900/20" disabled={isSubmitting}>
                 {isSubmitting ? (
                   <>
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                    Traitement...
+                    {t('common.modals.processing')}
                   </>
                 ) : (
-                  ticketStep === 2 ? 'Fermer' : 'Envoyer le Ticket'
+                  ticketStep === 2 ? t('common.close') : t('common.modals.send_ticket')
                 )}
               </Button>
             </div>
@@ -624,10 +631,10 @@ export const SupportPage = () => {
       {/* Document Detail Modal */}
       <AnimatePresence>
         {selectedDoc && (
-          <Modal 
-            isOpen={!!selectedDoc} 
+          <Modal
+            isOpen={!!selectedDoc}
             onClose={() => setSelectedDoc(null)}
-            title={`Détail Document: ${selectedDoc.name}`}
+            title={t('support.modals.doc_detail', { name: selectedDoc.name })}
           >
             <div className="space-y-8">
               <div className="flex flex-col sm:flex-row sm:items-center gap-6">
@@ -690,7 +697,7 @@ export const SupportPage = () => {
         )}
       </AnimatePresence>
       {/* Forum Modal */}
-      <Modal isOpen={isForumModalOpen} onClose={() => setIsForumModalOpen(false)} title="Forum Communauté VAN BTP" size="lg">
+      <Modal isOpen={isForumModalOpen} onClose={() => setIsForumModalOpen(false)} title={t('support.modals.forum')} size="lg">
         <div className="space-y-6">
           <p className="text-sm text-slate-600">Bienvenue sur le forum d'entraide. Discutez avec vos pairs et partagez vos bonnes pratiques.</p>
           <div className="space-y-4">
@@ -708,121 +715,39 @@ export const SupportPage = () => {
       </Modal>
 
       {/* Document Viewer Modal */}
-      <Modal isOpen={isViewerModalOpen} onClose={() => setIsViewerModalOpen(false)} title={`Visionneuse: ${selectedDoc?.name || 'Document'}`} size="full">
-        <div className="h-[80vh] flex flex-col">
-          <div className="flex-1 bg-slate-100 rounded-2xl overflow-hidden">
-            {selectedDoc && (
-              <div className="w-full h-full flex items-center justify-center p-4">
-                {/* Aperçu pour les images */}
-                {(selectedDoc.mimeType?.startsWith('image/') || selectedDoc.type?.toLowerCase().includes('photo')) && (
-                  <div className="w-full h-full flex items-center justify-center">
-                    <img 
-                      src={`http://localhost:3001/uploads/documents/${selectedDoc.filePath || selectedDoc.name}`}
-                      alt={selectedDoc.name}
-                      className="max-w-full max-h-full object-contain shadow-lg"
-                      onError={(e) => {
-                        const target = e.target as HTMLImageElement;
-                        target.style.display = 'none';
-                        const fallbackDiv = target.parentElement;
-                        if (fallbackDiv) {
-                          fallbackDiv.innerHTML = `
-                            <div class="flex flex-col items-center justify-center text-slate-400 p-8">
-                              <svg class="w-20 h-20 mb-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
-                              </svg>
-                              <h3 class="text-xl font-black mb-2">${selectedDoc.name}</h3>
-                              <p class="text-sm mb-4">Image non accessible</p>
-                              <button class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700" onclick="window.open('http://localhost:3001/uploads/documents/${selectedDoc.filePath || selectedDoc.name}', '_blank')">
-                                Ouvrir dans un nouvel onglet
-                              </button>
-                            </div>
-                          `;
-                        }
-                      }}
-                    />
-                  </div>
-                )}
-                
-                {/* Aperçu pour les PDFs avec embed */}
-                {selectedDoc.mimeType === 'application/pdf' && (
-                  <div className="w-full h-full">
-                    <embed 
-                      src={`http://localhost:3001/uploads/documents/${selectedDoc.filePath || selectedDoc.name}#toolbar=0&navpanes=0&scrollbar=0`}
-                      type="application/pdf"
-                      className="w-full h-full"
-                    />
-                  </div>
-                )}
-                
-                {/* Fallback pour les autres types de fichiers */}
-                {!selectedDoc.mimeType?.startsWith('image/') && 
-                 selectedDoc.mimeType !== 'application/pdf' && 
-                 !selectedDoc.type?.toLowerCase().includes('photo') && (
-                  <div className="flex flex-col items-center justify-center text-slate-400 p-8">
-                    <FileText className="w-20 h-20 mb-6" />
-                    <h3 className="text-xl font-black mb-2">{selectedDoc.name}</h3>
-                    <p className="text-sm mb-4">Type: {selectedDoc.type || 'Non défini'}</p>
-                    <p className="text-sm mb-6">Taille: {selectedDoc.size || 'Non spécifiée'}</p>
-                    <div className="flex gap-3">
-                      <Button onClick={() => {
-                        const link = document.createElement('a');
-                        link.href = `http://localhost:3001/uploads/documents/${selectedDoc.filePath || selectedDoc.name}`;
-                        link.download = selectedDoc.name;
-                        link.target = '_blank';
-                        document.body.appendChild(link);
-                        link.click();
-                        document.body.removeChild(link);
-                      }}>
-                        <Download className="w-4 h-4 mr-2" />
-                        Télécharger
-                      </Button>
-                      <Button variant="outline" onClick={() => {
-                        window.open(`http://localhost:3001/uploads/documents/${selectedDoc.filePath || selectedDoc.name}`, '_blank');
-                      }}>
-                        <BookOpen className="w-4 h-4 mr-2" />
-                        Ouvrir
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-          <div className="flex justify-center gap-4 p-4 border-t border-slate-100">
-            <Button variant="outline" onClick={() => window.location.reload()}>Actualiser</Button>
-            <Button onClick={() => {
-              const link = document.createElement('a');
-              link.href = `http://localhost:3001/uploads/documents/${selectedDoc?.filePath || selectedDoc?.name}`;
-              link.download = selectedDoc?.name;
-              link.target = '_blank';
-              document.body.appendChild(link);
-              link.click();
-              document.body.removeChild(link);
-            }}>
-              <Download className="w-4 h-4 mr-2" />
-              Télécharger
-            </Button>
-          </div>
+      <Modal
+        isOpen={isViewerModalOpen}
+        onClose={() => setIsViewerModalOpen(false)}
+        title={t('support.modals.viewer', { name: selectedDoc?.name || t('common.details') })}
+        size="full"
+      >
+        <div className="h-[78vh] min-h-[480px] flex flex-col">
+          {selectedDoc && (
+            <DocumentViewer
+              document={selectedDoc}
+              onDownload={() => handleDownload(selectedDoc)}
+            />
+          )}
         </div>
       </Modal>
 
       {/* Share Modal */}
-      <Modal isOpen={isShareModalOpen} onClose={() => setIsShareModalOpen(false)} title="Partager le document" size="sm">
+      <Modal isOpen={isShareModalOpen} onClose={() => setIsShareModalOpen(false)} title={t('support.modals.share')} size="sm">
         <div className="space-y-6">
-          <Input label="Destinataire (Email)" placeholder="email@exemple.com" />
+          <Input label={t('support.modals.share_recipient')} placeholder="email@exemple.com" />
           <div className="space-y-1.5">
-            <label className="text-sm font-bold text-slate-700">Message</label>
-            <textarea className="w-full h-24 p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]" placeholder="Message optionnel..."></textarea>
+            <label className="text-sm font-bold text-slate-700">{t('support.modals.share_message')}</label>
+            <textarea className="w-full h-24 p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-[var(--color-primary)]" placeholder={t('common.modals.optional_message')}></textarea>
           </div>
           <div className="flex flex-col sm:flex-row gap-3">
-            <Button className="flex-1 font-bold" onClick={() => { setIsShareModalOpen(false); notify("Lien de partage envoyé par email.", 'success', '/support'); }}>Envoyer</Button>
-            <Button variant="outline" className="font-bold" onClick={() => { setIsShareModalOpen(false); notify("Lien copié dans le presse-papier.", 'success', '/support'); }}>Copier le lien</Button>
+            <Button className="flex-1 font-bold" onClick={() => { setIsShareModalOpen(false); notify(t('support.modals.share_sent'), 'success', '/support'); }}>{t('common.send')}</Button>
+            <Button variant="outline" className="font-bold" onClick={() => { setIsShareModalOpen(false); notify(t('support.modals.link_copied'), 'success', '/support'); }}>{t('support.modals.copy_link')}</Button>
           </div>
         </div>
       </Modal>
 
       {/* Help Center Modal */}
-      <Modal isOpen={isHelpModalOpen} onClose={() => setIsHelpModalOpen(false)} title="Centre d'Aide" size="lg">
+      <Modal isOpen={isHelpModalOpen} onClose={() => setIsHelpModalOpen(false)} title={t('support.help.title')} size="lg">
         <div className="space-y-6">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />

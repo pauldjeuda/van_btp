@@ -4,8 +4,10 @@
  *
  * Basculement via VITE_DATA_SOURCE dans frontend/.env :
  *   VITE_DATA_SOURCE=local   → Retourne un tableau vide (données locales à venir)
- *   VITE_DATA_SOURCE=van_rh  → Données depuis le serveur VAN RH distant
+ *   VITE_DATA_SOURCE=van_rh  → Données depuis le serveur VAN RH (URL : backend/.env VAN_RH_URL)
  */
+
+import { getVanRhUrl, isVanRhDataSource, loadIntegrationConfig } from '../lib/integrationConfig';
 
 export interface EmployeeRH {
   id: string;
@@ -40,11 +42,16 @@ export interface EmployeeRH {
   updatedAt?: string;
 }
 
-// ─── Source de données active ─────────────────────────────────────────────────
-const DATA_SOURCE = import.meta.env.VITE_DATA_SOURCE || 'local';
-const VAN_RH_URL = import.meta.env.VITE_VAN_RH_URL || 'http://10.99.173.66:4000';
+const isVanRH = isVanRhDataSource();
 
-const isVanRH = DATA_SOURCE === 'van_rh';
+const requireVanRhUrl = async (): Promise<string> => {
+  await loadIntegrationConfig();
+  const url = getVanRhUrl();
+  if (!url) {
+    throw new Error('VAN_RH_URL non configuré sur le backend (backend/.env)');
+  }
+  return url;
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -65,9 +72,10 @@ const getAuthHeaders = (): HeadersInit => {
 // ─── Implémentation VAN RH ────────────────────────────────────────────────────
 
 const getAllEmployeesVanRH = async (): Promise<EmployeeRH[]> => {
-  console.log(`🌐 [EMPLOYEE RH SERVICE] Récupération depuis VAN RH : ${VAN_RH_URL}/api/employer-app/btp`);
+  const vanRhUrl = await requireVanRhUrl();
+  console.log(`🌐 [EMPLOYEE RH SERVICE] Récupération depuis VAN RH : ${vanRhUrl}/api/employer-app/btp`);
 
-  const response = await fetch(`${VAN_RH_URL}/api/employer-app/btp`, {
+  const response = await fetch(`${vanRhUrl}/api/employer-app/btp`, {
     method: 'GET',
     headers: getAuthHeaders(),
   });
@@ -113,9 +121,11 @@ const getEmployeeByIdVanRH = async (
 ): Promise<EmployeeRH | null> => {
   console.log(`🌐 [EMPLOYEE RH SERVICE] getEmployeeByIdVanRH — id=${id}, matricule=${matriculeFallback}`);
 
+  const vanRhUrl = await requireVanRhUrl();
+
   // ── Tentative 1 : endpoint direct ──────────────────────────────────────────
   try {
-    const response = await fetch(`${VAN_RH_URL}/api/employer-app/btp/${id}`, {
+    const response = await fetch(`${vanRhUrl}/api/employer-app/btp/${id}`, {
       method: 'GET',
       headers: getAuthHeaders(),
     });
